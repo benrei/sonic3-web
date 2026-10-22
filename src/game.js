@@ -5,6 +5,7 @@ import { VDP, SCREEN_W, SCREEN_H } from './vdp.js';
 import { Player } from './player.js';
 import { createObject } from './objects.js';
 import { TileAnimator } from './animate.js';
+import { ShieldObject } from './shields.js';
 
 const MAP_HUD = 0xe932;
 const HUD_DIGITS = 0xeed2; // ArtUnc_HUDDigits: 8x16 glyphs, $40 bytes each
@@ -108,6 +109,7 @@ export class Game {
     if (!freeze) {
       if (p.status & STATUS_ON_OBJ && !this.standingOn) p.status &= ~STATUS_ON_OBJ;
       p.update(input);
+      (this.shieldObj ??= new ShieldObject(this)).update(); // Obj_*Shield runs right after the player
     }
     if (p.dead || p.dying) this.handleDeath();
     this.soundEvents(p);
@@ -349,12 +351,15 @@ export class Game {
       this.lastDplcFrame = frame;
       this.loadPlayerArt(frame);
     }
+    // shield / insta-shield object (updated here, once per rendered game frame)
+    this.shieldObj?.draw(this.vdp, cx, cy);
     if (p.visible === false && !p.dying) return;
     const pieces = this.sonicMap[frame];
     if (!pieces) return;
     const art = ART_TILE.Player_1 | (p.highPriority ? 0x8000 : 0);
     this.vdp.addSprite(pieces, p.x_pos - cx, p.y_pos - cy, art, !!p.flipX, !!p.flipY, 0x100);
-    if (this.invincible > 0 || this.shield) this.drawAura(p.x_pos - cx, p.y_pos - cy);
+    const invincible = this.invincible > 0 || (p.status_secondary & 0x02);
+    if (invincible) this.drawAura(p.x_pos - cx, p.y_pos - cy);
   }
 
   // Sonic_Load_PLC: copy the frame's tiles from ArtUnc_Sonic into VRAM.

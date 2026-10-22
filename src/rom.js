@@ -31,6 +31,7 @@ export const ART_TILE = {
   StarPost: 0x5e4,
   Player_1: 0x680,
   Ring: 0x6bc,
+  PlayerLifeIcon: 0x7d4,
 };
 
 export const ZONES = [

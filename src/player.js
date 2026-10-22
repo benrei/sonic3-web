@@ -1049,15 +1049,19 @@ export class Player {
       this.shield_anim = 1;
       this.double_jump_flag = 1;
       const v = this.status & S_FACING ? -0x800 : 0x800;
+      this.onSound?.('fire');
       this.x_vel = v;
       this.ground_vel = v;
       this.y_vel = 0;
+      // move.w #$2000,(H_scroll_frame_offset).w / Reset_Player_Position_Array (camera lag)
+      this.scrollDelayRequest = { offset: 0x2000, resetPosTable: true };
       return;
     }
     if (s2 & STATUS2.LtngShield) {
       this.shield_anim = 1;
       this.double_jump_flag = 1;
       this.y_vel = -0x580;
+      this.onSound?.('lightning');
       this.jumping = 0;
       return;
     }
@@ -1065,6 +1069,7 @@ export class Player {
       this.shield_anim = 1;
       this.double_jump_flag = 1;
       this.x_vel = 0;
+      this.onSound?.('bubble');
       this.ground_vel = 0;
       this.y_vel = 0x800;
       return;
@@ -1074,6 +1079,7 @@ export class Player {
     this.shield_anim = 1;
     this.double_jump_flag = 1;
     this._instaShieldTimer = 15;
+    this.onSound?.('instashield');
   }
 
   // Sonic_Spindash; returns true when the rest of Sonic_MdNormal is skipped
@@ -1100,6 +1106,9 @@ export class Player {
       this._addY(5);
       this.spin_dash_flag = 0;
       this.ground_vel = SPINDASH_SPEEDS[this.spin_dash_counter >> 8];
+      // loc_12BDE: H_scroll_frame_offset = $2000 - ((speed - $800) * 2 & $1F00) (camera lag,
+      // consumed by MoveCameraX in camera.js)
+      this.scrollDelayRequest = { offset: (0x2000 - (((this.ground_vel - 0x800) * 2) & 0x1f00)) & 0xffff, resetPosTable: false };
       if (this.status & S_FACING) this.ground_vel = -this.ground_vel;
       this.status |= S_ROLL;
     } else {

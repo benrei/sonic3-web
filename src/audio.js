@@ -51,6 +51,10 @@ export class Audio {
         this.tone(f, 0.22, 'sawtooth', 0.05, 0, 4);
         break;
       }
+      case 'instashield': this.tone(900, 0.12, 'square', 0.05, 0, 0.5); this.noise(0.08, 0.05); break;
+      case 'fire': this.noise(0.3, 0.12); this.tone(150, 0.3, 'sawtooth', 0.05, 0, 2); break;
+      case 'lightning': this.tone(600, 0.2, 'square', 0.05, 0, 2.5); break;
+      case 'bubble': this.tone(300, 0.15, 'sine', 0.08, 0, 0.5); break;
       case 'release': this.noise(0.25, 0.08); this.tone(800, 0.2, 'sawtooth', 0.04, 0, 0.3); break;
       case 'roll': this.tone(500, 0.12, 'triangle', 0.06, 0, 0.5); break;
       case 'skid': this.noise(0.15, 0.05); break;
