@@ -47,13 +47,16 @@ export class VDP {
 
   // Draw one plane. hscroll(line) -> plane x of the screen's left edge,
   // vscroll -> plane y of the top line. Only pixels whose pattern priority == prio.
-  drawPlane(bg, prio, hscroll, vscroll) {
+  // vcols: optional per-16px-screen-column V-scroll (plane y of line 0 per column).
+  // Negative plane y wraps around the layout height (vertically looping levels).
+  drawPlane(bg, prio, hscroll, vscroll, vcols = null) {
     const L = this.level, frame = this.frame, pix = this.pixels, pal = this.palRGBA;
     const blocks = L.blocks;
     const wrapW = bg ? L.bgWidth * 128 : 0;
+    const wrapH = ((bg ? L.bgRowMask : L.rowMask) >> 2) * 128 + 127;
     for (let sy = 0; sy < SCREEN_H; sy++) {
-      const py = vscroll(sy);
-      if (py < 0) continue;
+      let py = vscroll(sy);
+      if (py < 0) py &= wrapH;
       let px = hscroll(sy) | 0;
       const rowBase = sy * SCREEN_W;
       let sx = 0;
@@ -61,6 +64,7 @@ export class VDP {
         let x = px + sx;
         if (bg && wrapW) x = ((x % wrapW) + wrapW) % wrapW;
         const span = 8 - (x & 7);
+        if (vcols) { py = (vcols[sx >> 4] + sy); if (py < 0) py &= wrapH; }
         if (x < 0 || (!bg && x >= L.widthPx)) { sx += span; continue; }
         const bw = L.blockWord(x, py, bg);
         let bx = x & 15, by = py & 15;
@@ -83,6 +87,39 @@ export class VDP {
             if (c) frame[rowBase + sx + i] = pal[pbase + c];
           }
           void flipH;
+        }
+        sx += span;
+      }
+    }
+  }
+
+  // Draw a 64x32-cell name table (plane B as built by scroll.js) with per-line H-scroll
+  // (hs[line] = plane x of the screen's left edge) and V-scroll vs (plane y of line 0),
+  // wrapping at 512x256 pixels like the VDP. vcols: optional per-16px-column V-scroll.
+  drawNameTable(nt, prio, hs, vs, vcols = null) {
+    const frame = this.frame, pix = this.pixels, pal = this.palRGBA;
+    for (let sy = 0; sy < SCREEN_H; sy++) {
+      const px = hs[sy] | 0;
+      const rowBase = sy * SCREEN_W;
+      let sx = 0;
+      while (sx < SCREEN_W) {
+        const x = (px + sx) & 511;
+        let span = 8 - (x & 7);
+        if (sx + span > SCREEN_W) span = SCREEN_W - sx;
+        const py = (sy + (vcols ? vcols[sx >> 4] : vs)) & 255;
+        const pn = nt[((py >> 3) << 6) | (x >> 3)];
+        if ((pn >>> 15) === prio) {
+          let ty = py & 7;
+          if (pn & 0x1000) ty = 7 - ty;
+          const tbase = (pn & 0x7ff) * 64 + ty * 8;
+          const pbase = ((pn >> 13) & 3) << 4;
+          const hf = pn & 0x800;
+          let lx = x & 7;
+          const o = rowBase + sx;
+          for (let i = 0; i < span; i++, lx++) {
+            const c = pix[tbase + (hf ? 7 - lx : lx)];
+            if (c) frame[o + i] = pal[pbase + c];
+          }
         }
         sx += span;
       }
@@ -133,6 +170,20 @@ export class VDP {
         if (c) frame[sy * SCREEN_W + sx] = pal[pbase + c];
       }
     }
+  }
+
+  // Render with the scroll state from scroll.js: { fg, fgV, bg, bgV, bgNT, fgVcols, bgVcols }.
+  renderScroll(sc) {
+    this.frame.fill(this.palRGBA[this.backdrop]);
+    const fgH = (y) => sc.fg[y], fgV = (y) => sc.fgV + y;
+    this.sprites.sort((a, b) => a.order - b.order);
+    this.drawNameTable(sc.bgNT, 0, sc.bg, sc.bgV, sc.bgVcols);
+    this.drawPlane(false, 0, fgH, fgV, sc.fgVcols);
+    this.drawSprites(0);
+    this.drawNameTable(sc.bgNT, 1, sc.bg, sc.bgV, sc.bgVcols);
+    this.drawPlane(false, 1, fgH, fgV, sc.fgVcols);
+    this.drawSprites(1);
+    this.sprites.length = 0;
   }
 
   render(fgX, fgY, bgH, bgV) {

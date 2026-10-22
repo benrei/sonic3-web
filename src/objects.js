@@ -1,8 +1,14 @@
-// Level objects. Behaviour is a simplified port of the original object code
-// (Obj_PathSwap, Obj_Monitor, Obj_Spring, Obj_Spikes, badniks, ...); art and
-// mappings are always taken from the ROM.
+// Level objects: ports of the original object code (s3.asm) on top of objcore.js.
+// Labels in comments are the original ones; loc_xxxxx labels are ROM addresses.
+// Art, mappings, animation scripts and data tables are read from the ROM.
+import { Obj, Explosion, Projectile, P1_STANDING, P1_PUSHING, TOUCH_SIDE, TOUCH_BOTTOM } from './objcore.js';
 
-const STATUS_FACING_LEFT = 1, STATUS_IN_AIR = 2, STATUS_ROLL = 4, STATUS_ON_OBJ = 8, STATUS_PUSH = 0x20;
+const S_FACING = 1, S_INAIR = 2, S_ROLL = 4, S_ONOBJ = 8, S_PUSH = 0x20;
+const SS_INVINCIBLE = 2, SS_FIRE = 0x10;
+
+const s8 = (v) => (v << 24) >> 24;
+const s16 = (v) => (v << 16) >> 16;
+const u16 = (v) => v & 0xffff;
 
 export const MAP = {
   PathSwap: 0x1b372,
@@ -11,451 +17,1038 @@ export const MAP = {
   Spring2: 0x21f92,
   Spikes: 0x22a5c,
   Rock: 0x1dcdc,
+  Rock2: 0x1dd64,
   StarPost: 0x2c7be,
   FloatingPlatform: 0x24598,
+  HCZFloatingPlatform: 0x2457e,
+  MGZFloatingPlatform: 0x2454a,
   CollapsingPlatform: 0x1e6c8,
+  CollapsingPlatform2: 0x1e7ac,
+  ICZCollapsingBridge: 0x1f2f2,
   Rhinobot: 0x1615a8,
   Bloominator: 0x1616c0,
   MonkeyDude: 0x161776,
   Plant: 0x2b8ec,
-  Explosion: null,
 };
 
-// Player helpers ------------------------------------------------------------
+const ANI = {
+  Monitor: 0x1b8f0, // Ani_Monitor
+  Spring: 0x21db0, // Ani_Spring
+  Starpost: 0x2c7ae, // Ani_Starpost
+};
 
-function playerBox(p) {
-  return { l: p.x_pos - 8, r: p.x_pos + 8, t: p.y_pos - p.y_radius + 3, b: p.y_pos + p.y_radius - 3 };
-}
-function overlap(p, x, y, hw, hh) {
-  const b = playerBox(p);
-  return b.r > x - hw && b.l < x + hw && b.b > y - hh && b.t < y + hh;
-}
-// Attacking = rolling/jumping (anim 2 = roll), or invincible.
-function isAttacking(p, game) {
-  return p.anim === 2 || (p.status & STATUS_ROLL) !== 0 || game.invincible > 0;
+const TBL = {
+  SpikeSizes: 0x22602, // byte_22602
+  RockSizes: 0x1d64e, // byte_1D64E
+  RockDebrisPos: 0x1dbea, // off_1DBEA
+  RockDebrisVel: 0x1dc28, // off_1DC28
+  RockDebrisSideL: 0x1dc30, // word_1DC30
+  RockDebrisSideR: 0x1dc50, // word_1DC50
+  DiagUpSlope: 0x21d78, // byte_21D78
+  DiagDownSlope: 0x21d94, // byte_21D94
+  PlatformSizes: 0x243f0, // byte_243F0
+  CollapseTimers: 0x1e49c, // byte_1E49C
+  CollapseSlope: 0x1e658, // byte_1E658
+  ICZCollapseTimers: 0x1e4ba, // byte_1E4BA
+  ICZCollapseSlope: 0x1e698, // byte_1E698
+};
+
+function romBytes(game, addr, n) { return game.rom.u8.subarray(addr, addr + n); }
+
+// Spring / spike helper: player bits shared by the spring launch routines
+// (flip/twirl subtypes and the path selection bits 2-3 of the subtype)
+function springFlipAndPath(p, d0, speed, remainingIfNotBit1, remainingIfBit1) {
+  if (d0 & 1) {
+    p.ground_vel = 1;
+    p.flip_angle = 1;
+    p.anim = 0;
+    p.flips_remaining = remainingIfBit1;
+    p.flip_speed = speed;
+    if (!(d0 & 2)) p.flips_remaining = remainingIfNotBit1;
+    if (p.status & S_FACING) {
+      p.flip_angle = 0xff;
+      p.ground_vel = -1;
+    }
+  }
+  const path = d0 & 0xc;
+  if (path === 4) { p.top_solid_bit = 0xc; p.lrb_solid_bit = 0xd; }
+  if (path === 8) { p.top_solid_bit = 0xe; p.lrb_solid_bit = 0xf; }
 }
 
-// Generic solid object (simplified SolidObjectFull). Returns side touched:
-// 'top' | 'bottom' | 'left' | 'right' | null.
-export function solidObject(game, obj, hw, hTop, hBot = hTop, topOnly = false) {
+// sub_228EC: hurt the player (spikes, Eggman monitor) after undoing his last y move
+function hurtFromSpikes(game, srcX) {
   const p = game.player;
-  if (p.dead) return null;
-  if (obj.standing) {
-    // keep player on top while standing (MvSonicOnPtfm)
-    const dx = p.x_pos - obj.x;
-    if ((p.status & STATUS_IN_AIR) || Math.abs(dx) > hw + 8 || game.standingOn !== obj) {
-      obj.standing = false;
-      if (game.standingOn === obj) {
-        game.standingOn = null;
-        p.status &= ~STATUS_ON_OBJ;
-        if (!(p.status & STATUS_IN_AIR)) p.status |= STATUS_IN_AIR;
-      }
-      return null;
-    }
-    p.y_pos = obj.y - hTop - p.y_radius;
-    return 'top';
-  }
-  const pw = 10;
-  const l = obj.x - hw - pw, r = obj.x + hw + pw;
-  const t = obj.y - hTop - p.y_radius, b = obj.y + hBot + p.y_radius;
-  const px = p.x_pos, py = p.y_pos;
-  if (px <= l || px >= r || py <= t || py >= b) return null;
-  const dTop = py - t, dBot = b - py, dL = px - l, dR = r - px;
-  const minY = Math.min(dTop, dBot), minX = Math.min(dL, dR);
-  if (topOnly) {
-    if (p.y_vel >= 0 && dTop <= 16) return land(game, obj, hTop);
-    return null;
-  }
-  if (minY <= minX || minY < 6) {
-    if (dTop <= dBot) {
-      if (p.y_vel >= 0) return land(game, obj, hTop);
-      return null;
-    }
-    if (p.y_vel < 0) {
-      p.y_pos = b;
-      p.y_vel = 0;
-    }
-    return 'bottom';
-  }
-  // side
-  const fromLeft = dL < dR;
-  p.x_pos = fromLeft ? l : r;
-  if ((fromLeft && p.x_vel > 0) || (!fromLeft && p.x_vel < 0)) {
-    p.x_vel = 0;
-    p.ground_vel = 0;
-    if (!(p.status & STATUS_IN_AIR)) p.status |= STATUS_PUSH;
-  }
-  return fromLeft ? 'left' : 'right';
+  if (p.status_secondary & SS_INVINCIBLE) return;
+  if (p.invulnerable_time) return;
+  if (p.routine >= 4) return;
+  p._y = (p._y - (p.y_vel << 8)) | 0;
+  game.core.hurtCharacter(srcX);
 }
 
-function land(game, obj, hTop) {
-  const p = game.player;
-  p.y_pos = obj.y - hTop - p.y_radius;
-  if (p.status & STATUS_IN_AIR) {
-    // RideObject_SetRide: land on the object like Player_TouchFloor
-    p.ground_vel = p.x_vel;
-    p.y_vel = 0;
-    p.angle = 0;
-    if (typeof p._touchFloorCheckSpindash === 'function') p._touchFloorCheckSpindash();
-    else p.status &= ~STATUS_IN_AIR;
-    p.y_pos = obj.y - hTop - p.y_radius;
-  }
-  p.y_vel = 0;
-  p.angle = 0;
-  p.status |= STATUS_ON_OBJ;
-  obj.standing = true;
-  if (game.standingOn && game.standingOn !== obj) game.standingOn.standing = false;
-  game.standingOn = obj;
-  return 'top';
-}
-
-// Objects -----------------------------------------------------------------
-
-class Obj {
-  constructor(game, d) {
-    Object.assign(this, { x: d.x, y: d.y, xflip: !!d.xflip, yflip: !!d.yflip, id: d.id, subtype: d.subtype });
-    this.game = game;
-    this.alive = true;
-    this.frame = 0;
-    this.order = 0x200;
-  }
-  update() {}
-  draw(vdp, cx, cy) {
-    if (!this.map) return;
-    const pieces = this.map[this.frame];
-    if (pieces) vdp.addSprite(pieces, this.x - cx, this.y - cy, this.art, this.xflip, this.yflip, this.order);
-  }
-}
-
-// Obj_PathSwap ($1AFC2): invisible collision-layer switcher.
+// =============================================================================
+// Obj_PathSwap ($1AFC2): invisible collision-layer / sprite-priority switcher.
 class PathSwap extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.vertical = (this.subtype & 4) !== 0;
-    this.size = [0x20, 0x40, 0x80, 0x100][this.subtype & 3];
-    const p = game.player;
-    this.side = this.vertical ? (p.y_pos >= this.y ? 1 : 0) : (p.x_pos >= this.x ? 1 : 0);
+    this.mappings = game.maps(MAP.PathSwap);
+    this.art_tile = 0x26bc;
+    this.width_pixels = 0x40;
+    this.height_pixels = 0x40;
+    this.priority = 0x280;
+    const s = this.subtype, p = game.player;
+    this.vertical = (s & 4) !== 0; // horizontal line: player crosses it moving up/down
+    this.mapping_frame = this.vertical ? s & 7 : s & 3;
+    this.size = [0x20, 0x40, 0x80, 0x100][s & 3]; // word_1B048 ($32)
+    // $34: which side Player 1 is on
+    if (this.vertical) this.side = u16(this.y_pos) >= u16(p.y_pos) ? 0 : 1;
+    else this.side = u16(this.x_pos) >= u16(p.x_pos) ? 0 : 1;
   }
   update() {
-    const p = this.game.player, s = this.subtype;
-    const along = this.vertical ? p.y_pos : p.x_pos;
-    const pos = this.vertical ? this.y : this.x;
-    const cross = this.vertical ? p.x_pos : p.y_pos;
-    const crossPos = this.vertical ? this.x : this.y;
-    const now = along >= pos ? 1 : 0;
-    if (now === this.side) return;
-    this.side = now;
-    if (cross < crossPos - this.size || cross >= crossPos + this.size) return;
-    if ((s & 0x80) && (p.status & STATUS_IN_AIR)) return;
-    if (!this.xflip) {
-      const second = now ? (s & 8) : (s & 0x10);
-      p.top_solid_bit = second ? 0xe : 0xc;
-      p.lrb_solid_bit = second ? 0xf : 0xd;
+    // loc_1B09E / loc_1B208
+    this.vertical ? this.sub_1B25A() : this.sub_1B0F0();
+    this.deleteIfNotInRange();
+  }
+  // sub_1B0F0 (vertical line, crossed horizontally)
+  sub_1B0F0() {
+    const p = this.game.player, d1 = this.x_pos;
+    if (!this.side) {
+      if (u16(d1) > u16(p.x_pos)) return;
+      this.side = 1;
+      this.apply(p, p.y_pos, this.y_pos, p.x_pos - d1, 8, 0x20);
+    } else {
+      if (u16(d1) <= u16(p.x_pos)) return;
+      this.side = 0;
+      this.apply(p, p.y_pos, this.y_pos, p.x_pos - d1, 0x10, 0x40);
     }
-    p.highPriority = !!(now ? (s & 0x20) : (s & 0x40));
+  }
+  // sub_1B25A (horizontal line, crossed vertically)
+  sub_1B25A() {
+    const p = this.game.player, d1 = this.y_pos;
+    if (!this.side) {
+      if (u16(d1) > u16(p.y_pos)) return;
+      this.side = 1;
+      this.apply(p, p.x_pos, this.x_pos, p.y_pos - d1, 8, 0x20);
+    } else {
+      if (u16(d1) <= u16(p.y_pos)) return;
+      this.side = 0;
+      this.apply(p, p.x_pos, this.x_pos, p.y_pos - d1, 0x10, 0x40);
+    }
+  }
+  apply(p, cross, centre, along, pathBit, prioBit) {
+    const d0 = this.subtype;
+    if (cross < centre - this.size || cross >= centre + this.size) return;
+    if ((d0 & 0x80) && (p.status & S_INAIR)) return;
+    if (Math.abs(s16(along)) >= 0x40) return;
+    if (!(this.render_flags & 1)) {
+      p.top_solid_bit = 0xc;
+      p.lrb_solid_bit = 0xd;
+      if (d0 & pathBit) { p.top_solid_bit = 0xe; p.lrb_solid_bit = 0xf; }
+    }
+    p.highPriority = (d0 & prioBit) !== 0;
   }
 }
 
-// Obj_Monitor: solid box, breaks when rolled into or jumped on.
+// =============================================================================
+// Obj_Monitor
 class Monitor extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.map = game.maps(MAP.Monitor);
-    this.art = 0x4c4;
-    this.order = 0x180;
-    this.broken = false;
-    this.timer = 0;
-    this.animIndex = 0;
-    this.icon = null;
+    // Obj_MonitorInit
+    this.routine = 2;
+    this.y_radius = 0xf;
+    this.x_radius = 0xf;
+    this.mappings = game.maps(MAP.Monitor);
+    this.art_tile = 0x4c4;
+    this.priority = 0x180;
+    this.width_pixels = 0xe;
+    this.height_pixels = 0x10;
+    if (this.respawnByte & 1) {
+      this.routine = 8;
+      this.mapping_frame = 0xb;
+      return;
+    }
+    this.collision_flags = 0x46;
+    this.anim = this.subtype;
   }
   update() {
-    const g = this.game, p = g.player;
-    if (this.broken) {
-      if (this.icon) {
-        this.icon.y += this.icon.vy;
-        this.icon.vy = Math.min(0, this.icon.vy + 0x18 / 256);
-        if (++this.icon.t > 60) this.icon = null;
-      }
-      this.frame = 0xb;
-      solidObject(g, this, 15, 0, 0, true);
-      return;
+    switch (this.routine) {
+      case 2: return this.main();
+      case 4: return this.monitorBreak();
+      case 6: this.animateSprite(ANI.Monitor); return this.spriteOnScreenTest();
+      default: return this.spriteOnScreenTest(); // loc_1B504
     }
-    // Ani_Monitor: [0, icon, icon, 1, icon, icon] at 2 ticks per frame
-    if (++this.timer >= 2) {
-      this.timer = 0;
-      this.animIndex = (this.animIndex + 1) % 6;
-    }
-    const icon = this.subtype + 1;
-    this.frame = [0, icon, icon, 1, icon, icon][this.animIndex];
-    // Rolling player breaks it (touch response) instead of being blocked
-    if (isAttacking(p, g) && overlap(p, this.x, this.y, 14, 16) && !this.standing) {
-      if (p.y_vel < 0 && p.y_pos > this.y + 4) {
-        // hit from below: monitor bounces (simplified: just block)
-        solidObject(g, this, 0x19 - 10, 16, 17);
-        return;
-      }
-      this.break();
-      return;
-    }
-    solidObject(g, this, 0x19 - 10, 16, 17);
   }
-  break() {
-    const g = this.game, p = g.player;
-    this.broken = true;
-    if (this.standing) { this.standing = false; g.standingOn = null; }
-    if (p.status & STATUS_IN_AIR) p.y_vel = -Math.abs(p.y_vel); // Touch_Monitor: rebound
-    g.spawnExplosion(this.x, this.y - 2);
-    g.sfx('destroy');
-    this.icon = { y: this.y - 4, vy: -3, t: 0, frame: this.subtype + 1 };
-    g.monitorReward(this.subtype);
-  }
-  draw(vdp, cx, cy) {
-    super.draw(vdp, cx, cy);
-    if (this.icon) {
-      // only the icon part of the frame (last piece is the screen) - draw the whole frame small offset
-      const pieces = this.map[this.icon.frame];
-      if (pieces) vdp.addSprite(pieces.slice(0, 1), this.x - cx, this.icon.y - cy - 0, this.art, false, false, 0x100);
+  // Obj_MonitorMain
+  main() {
+    const core = this.core, p = this.game.player;
+    if (this.routine_secondary) {
+      // knocked up from below: fall back onto the floor
+      this.moveSprite();
+      if (this.y_vel >= 0) {
+        const d1 = this.objCheckFloorDist();
+        if (d1 < 0) {
+          this.y_pos = s16(this.y_pos + d1);
+          this.y_vel = 0;
+          this.routine_secondary = 0;
+        }
+      }
     }
+    // loc_1B4C8: SolidObject_Monitor_Sonic
+    const d1 = 0x19, d2 = 0x10, d3 = 0x11, d4 = this.x_pos;
+    if (this.status & P1_STANDING) {
+      // Monitor_ChkOverEdge
+      const d0 = s16(p.x_pos - this.x_pos + d1);
+      if (!(p.status & S_INAIR) && d0 >= 0 && d0 < d1 * 2) core.mvSonicOnPtfm(this, d3, d4);
+      else {
+        p.status &= ~S_ONOBJ;
+        p.status |= S_INAIR;
+        this.status &= ~P1_STANDING;
+      }
+    } else if (p.anim !== 2) {
+      core.solidObjectCont(this, d1, d2, d3, d4);
+    }
+    this.addTouch();
+    // Obj_MonitorAnimate
+    this.animateSprite(ANI.Monitor);
+    this.spriteOnScreenTest();
+  }
+  // Obj_MonitorBreak
+  monitorBreak() {
+    const g = this.game, p = g.player;
+    if (this.status & (P1_STANDING | P1_PUSHING)) {
+      p.status &= 0xd7;
+      p.status |= S_INAIR;
+    }
+    // Obj_MonitorSpawnIcon
+    this.status = 0;
+    this.routine = 6;
+    this.collision_flags = 0;
+    this.core.spawn(new MonitorContents(g, this.x_pos, this.y_pos, this.anim));
+    this.core.spawn(new Explosion(g, this.x_pos, this.y_pos, 2));
+    this.respawnByte = this.respawnByte | 1;
+    this.anim = 0xa;
+    this.display();
   }
 }
 
-// Obj_Spring: up / horizontal / down. Red = -$1000, yellow = -$A00.
+// Obj_MonitorContents: the icon rises, then the power-up is given
+class MonitorContents extends Obj {
+  constructor(game, x, y, anim) {
+    super(game, { x, y });
+    this.anim = anim;
+  }
+  update() {
+    if (this.routine === 0) {
+      // loc_1B616
+      this.routine = 2;
+      this.art_tile = 0x84c4; // make_art_tile(ArtTile_Monitors,0,1)
+      this.render_flags = 0x24;
+      this.priority = 0x180;
+      this.width_pixels = 8;
+      this.y_vel = -0x300;
+      this.mapping_frame = this.anim + 1;
+      const frame = this.game.maps(MAP.Monitor)[this.mapping_frame];
+      this.pieces = frame ? frame.slice(0, 1) : null; // static mappings: first piece only
+    }
+    if (this.routine === 2) {
+      // sub_1B65C
+      if (this.y_vel < 0) {
+        this.moveSprite2();
+        this.y_vel = s16(this.y_vel + 0x18);
+      } else {
+        this.routine = 4;
+        this.anim_frame_timer = 30 - 1;
+        this.game.monitorReward(this.anim, this);
+      }
+      return this.display();
+    }
+    // loc_1B8E4
+    if (--this.anim_frame_timer < 0) return this.delete();
+    this.display();
+  }
+}
+
+// =============================================================================
+// Obj_Spring
 class Spring extends Obj {
   constructor(game, d) {
     super(game, d);
-    const yellow = (this.subtype & 2) !== 0;
-    this.map = game.maps(yellow ? MAP.Spring2 : MAP.Spring);
-    this.power = yellow ? 0xa00 : 0x1000;
-    this.kind = (this.subtype >> 4) & 7; // 0 up, 1 horizontal, 2 down, 3/4 diagonal
-    this.art = 0x4a4;
-    this.baseFrame = 0;
-    if (this.kind === 1) { this.art = 0x4b4; this.baseFrame = 3; }
-    if (this.kind === 2) { this.baseFrame = 6; this.yflip = true; }
-    this.frame = this.baseFrame;
-    this.anim = 0;
+    this.mappings = game.maps(MAP.Spring);
+    this.art_tile = 0x4a4; // make_art_tile(ArtTile_SpikesSprings+$10,0,0)
+    this.width_pixels = 0x10;
+    this.height_pixels = 0x10;
+    this.priority = 0x200;
+    this.homeX = this.x_pos; // $32
+    this.homeY = this.y_pos; // $34
+    this.kind = (this.subtype >> 4) & 7; // Spring_Index
+    if (this.kind > 4) this.kind = 0;
+    switch (this.kind) {
+      case 1: // Spring_Horizontal
+        this.anim = 2;
+        this.mapping_frame = 3;
+        this.art_tile = 0x4b4;
+        this.width_pixels = 8;
+        break;
+      case 2: // Spring_Down
+        this.mapping_frame = 6;
+        this.status |= 2;
+        break;
+      case 3: // Spring_UpDiag
+        this.anim = 4;
+        this.mapping_frame = 7;
+        this.art_tile = (game.zone.id >> 8) === 2 ? 0x478 : 0x43a;
+        this.slope = romBytes(game, TBL.DiagUpSlope, 28);
+        break;
+      case 4: // Spring_DownDiag
+        this.anim = 4;
+        this.mapping_frame = 0xa;
+        this.art_tile = (game.zone.id >> 8) === 2 ? 0x478 : 0x43a;
+        this.status |= 2;
+        this.slope = romBytes(game, TBL.DiagDownSlope, 28);
+        break;
+    }
+    // Spring_Common (word_215A2)
+    this.power = this.subtype & 2 ? -0xa00 : -0x1000; // $30
+    if (this.subtype & 2) this.mappings = game.maps(MAP.Spring2);
   }
   update() {
-    const g = this.game, p = g.player;
-    if (this.anim > 0) { this.anim--; this.frame = this.baseFrame + (this.anim > 4 ? 2 : 1); }
-    else this.frame = this.baseFrame;
-    if (this.kind === 1) {
-      const side = solidObject(g, this, 8, 16, 16);
-      const facingRight = !this.xflip;
-      if ((side === 'right' && !facingRight) || (side === 'left' && facingRight) ||
-          (overlap(p, this.x, this.y, 12, 14) && !(p.status & STATUS_IN_AIR))) {
-        const dir = facingRight ? 1 : -1;
-        if (Math.sign(p.x_pos - this.x) === dir || side) {
-          p.springLaunch(dir * this.power, 0);
-          if (dir > 0) p.status &= ~STATUS_FACING_LEFT; else p.status |= STATUS_FACING_LEFT;
-          this.anim = 8;
-          g.sfx('spring');
+    const core = this.core;
+    switch (this.kind) {
+      case 0: // Obj_Spring_Up
+        core.solidObjectFull2(this, 0x1b, 8, 0x10, this.x_pos);
+        if (this.status & P1_STANDING) this.launchUp();
+        this.animateSprite(ANI.Spring);
+        return this.spriteOnScreenTest();
+      case 1: { // Obj_Spring_Horizontal
+        const p = this.game.player;
+        core.solidObjectFull2(this, 0x13, 0xe, 0xf, this.x_pos);
+        if (core.d6 & TOUCH_SIDE) {
+          let d1 = this.status;
+          if (u16(this.x_pos) >= u16(p.x_pos)) d1 ^= 1;
+          if (!(d1 & 1)) this.launchHorizontal(8);
         }
+        this.sub_2190C();
+        this.animateSprite(ANI.Spring);
+        return this.spriteOnScreenTest(this.homeX);
       }
-      return;
+      case 2: // Obj_Spring_Down
+        if (core.solidObjectFull2(this, 0x1b, 8, 9, this.x_pos) === -2) this.launchDown();
+        this.animateSprite(ANI.Spring);
+        return this.spriteOnScreenTest();
+      case 3: // Obj_Spring_UpDiag
+        core.solidObjectSloped(this, 0x1b, 0x10, this.slope, this.x_pos);
+        if (this.status & P1_STANDING) this.sub_21B74();
+        this.animateSprite(ANI.Spring);
+        return this.spriteOnScreenTest(this.homeX);
+      case 4: // Obj_Spring_DownDiag
+        if (core.solidObjectSloped(this, 0x1b, 0x10, this.slope, this.x_pos) === -2) this.launchDownDiag();
+        this.animateSprite(ANI.Spring);
+        return this.spriteOnScreenTest(this.homeX);
     }
-    if (this.kind === 2) {
-      const side = solidObject(g, this, 16, 8, 8);
-      if (side === 'bottom') {
-        p.springLaunch(p.x_vel, this.power);
-        this.anim = 8;
-        g.sfx('spring');
-      }
-      return;
+  }
+  // sub_2164A
+  launchUp() {
+    const p = this.game.player;
+    this.anim = 1; this.prev_anim = 0;
+    p.y_pos = s16(p.y_pos + 8);
+    p.y_vel = this.power;
+    p.status |= S_INAIR;
+    p.status &= ~S_ONOBJ;
+    p.jumping = 0;
+    p.spin_dash_flag = 0;
+    p.anim = 0x10;
+    p.routine = 2;
+    const d0 = this.subtype;
+    if (d0 & 0x80) p.x_vel = 0;
+    springFlipAndPath(p, d0, 4, 1, 0);
+    this.game.sfx('spring');
+  }
+  // sub_21836 (d = 8; the 2P variant sub_21806 uses 4)
+  launchHorizontal(d) {
+    const p = this.game.player;
+    this.anim = 3; this.prev_anim = 0;
+    p.x_vel = this.power;
+    p.x_pos = s16(p.x_pos + d);
+    p.status |= S_FACING;
+    if (!(this.status & 1)) {
+      p.status &= ~S_FACING;
+      p.x_pos = s16(p.x_pos - 2 * d);
+      p.x_vel = s16(-p.x_vel);
     }
-    const side = solidObject(g, this, 16, 8, 8);
-    if (side === 'top' && this.standing) {
-      this.standing = false;
-      g.standingOn = null;
-      p.status &= ~STATUS_ON_OBJ;
-      p.y_pos -= 8;
-      p.springLaunch(p.x_vel, -this.power);
-      this.anim = 8;
-      g.sfx('spring');
+    // loc_21864
+    p.move_lock = 0xf;
+    p.ground_vel = p.x_vel;
+    if (!(p.status & S_ROLL)) p.anim = 0;
+    const d0 = this.subtype;
+    if (d0 & 0x80) p.y_vel = 0;
+    springFlipAndPath(p, d0, 8, 3, 1);
+    this.status &= ~P1_PUSHING;
+    p.status &= ~S_PUSH;
+    this.game.sfx('spring');
+  }
+  // sub_2190C: launch a player standing in front of the spring's face
+  sub_2190C() {
+    if (this.anim === 3) return;
+    const p = this.game.player;
+    let d0 = this.x_pos, d1 = d0 + 0x28;
+    if (this.status & 1) { d1 = d0; d0 -= 0x28; }
+    const d2 = this.y_pos - 0x18, d3 = this.y_pos + 0x18;
+    if (p.status & S_INAIR) return;
+    let d4 = p.ground_vel;
+    if (this.status & 1) d4 = s16(-d4);
+    if (d4 < 0) return;
+    if (u16(p.x_pos) < u16(d0) || u16(p.x_pos) >= u16(d1)) return;
+    if (u16(p.y_pos) < u16(d2) || u16(p.y_pos) >= u16(d3)) return;
+    this.launchHorizontal(8);
+  }
+  // sub_21A6A
+  launchDown() {
+    const p = this.game.player;
+    p.y_pos = s16(p.y_pos - 8);
+    this.anim = 1; this.prev_anim = 0;
+    p.y_vel = s16(-this.power);
+    if (p.y_vel === 0x1000) p.y_vel = 0xd00;
+    const d0 = this.subtype;
+    if (d0 & 0x80) p.x_vel = 0;
+    springFlipAndPath(p, d0, 4, 1, 0);
+    p.status |= S_INAIR;
+    p.status &= ~S_ONOBJ;
+    p.jumping = 0;
+    p.routine = 2;
+    this.game.sfx('spring');
+  }
+  // sub_21B74
+  sub_21B74() {
+    const p = this.game.player;
+    if (!(this.status & 1)) { if (!(u16(this.x_pos - 4) < u16(p.x_pos))) return; }
+    else if (!(u16(this.x_pos + 4) >= u16(p.x_pos))) return;
+    // loc_21B98
+    this.anim = 5; this.prev_anim = 0;
+    p.y_vel = this.power;
+    p.x_vel = this.power;
+    p.y_pos = s16(p.y_pos + 6);
+    p.x_pos = s16(p.x_pos + 6);
+    p.status |= S_FACING;
+    if (!(this.status & 1)) {
+      p.status &= ~S_FACING;
+      p.x_pos = s16(p.x_pos - 12);
+      p.x_vel = s16(-p.x_vel);
     }
+    p.status |= S_INAIR;
+    p.status &= ~S_ONOBJ;
+    p.jumping = 0;
+    p.anim = 0x10;
+    p.routine = 2;
+    springFlipAndPath(p, this.subtype, 8, 3, 1);
+    this.game.sfx('spring');
+  }
+  // sub_21CB2
+  launchDownDiag() {
+    const p = this.game.player;
+    this.anim = 5; this.prev_anim = 0;
+    p.y_vel = s16(-this.power);
+    p.x_vel = this.power;
+    p.y_pos = s16(p.y_pos - 6);
+    p.x_pos = s16(p.x_pos + 6);
+    p.status |= S_FACING;
+    if (!(this.status & 1)) {
+      p.status &= ~S_FACING;
+      p.x_pos = s16(p.x_pos - 12);
+      p.x_vel = s16(-p.x_vel);
+    }
+    p.status |= S_INAIR;
+    p.status &= ~S_ONOBJ;
+    p.jumping = 0;
+    p.routine = 2;
+    springFlipAndPath(p, this.subtype, 8, 3, 1);
+    this.game.sfx('spring');
   }
 }
 
-// Obj_Spikes: solid, hurts on the pointed side.
+// =============================================================================
+// Obj_Spikes
 class Spikes extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.map = game.maps(MAP.Spikes);
-    const idx = (this.subtype >> 4) & 7;
-    this.frame = idx;
-    this.sideways = idx >= 4;
-    this.art = this.sideways ? 0x494 : 0x49c;
-    const sizes = [[0x10, 0x10], [0x20, 0x10], [0x30, 0x10], [0x40, 0x10], [0x10, 0x10], [0x10, 0x20], [0x10, 0x30], [0x10, 0x40]];
-    [this.hw, this.hh] = sizes[idx];
-    this.hw -= 4;
+    this.priority = 0x200;
+    const d0 = (this.subtype & 0xf0) >> 3;
+    const t = romBytes(game, TBL.SpikeSizes, 16);
+    this.width_pixels = t[d0];
+    this.height_pixels = t[d0 + 1];
+    this.mappings = game.maps(MAP.Spikes);
+    this.art_tile = 0x49c; // make_art_tile(ArtTile_SpikesSprings+$8,0,0)
+    this.mapping_frame = d0 >> 1;
+    this.mode = 0; // loc_226FC: pointing up
+    if (this.mapping_frame >= 4) { this.mode = 1; this.art_tile = 0x494; } // loc_2274E: sideways
+    if (this.status & 2) this.mode = 2; // loc_227AA: pointing down
+    this.homeX = this.x_pos; // $30
+    this.homeY = this.y_pos; // $32
+    this.move = (this.subtype & 0xf) * 2;
+    this.offset = 0; // $34
+    this.dir = 0; // $36
+    this.wait = 0; // $38
   }
   update() {
-    const g = this.game, p = g.player;
-    const side = solidObject(g, this, this.hw, this.hh, this.hh);
-    if (!side) return;
-    let hurts;
-    if (this.sideways) hurts = this.xflip ? side === 'left' : side === 'right';
-    else hurts = this.yflip ? side === 'bottom' : side === 'top';
-    if (hurts && g.invincible <= 0 && !p.invulnerable_time) {
-      if (side === 'top') { this.standing = false; g.standingOn = null; p.status &= ~STATUS_ON_OBJ; }
-      g.hurtPlayer(this.x, true);
+    const core = this.core, g = this.game;
+    this.sub_22922();
+    core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
+    if (this.mode === 0) {
+      if (this.status & P1_STANDING) hurtFromSpikes(g, this.x_pos);
+    } else if (this.mode === 1) {
+      if (core.d6 & TOUCH_SIDE) {
+        hurtFromSpikes(g, this.x_pos);
+        this.status &= ~P1_PUSHING;
+      }
+    } else if (core.d6 & TOUCH_BOTTOM) hurtFromSpikes(g, this.x_pos);
+    this.spriteOnScreenTest(this.homeX);
+  }
+  // sub_22922: moving spikes (subtype 1 = vertical, 2 = horizontal)
+  sub_22922() {
+    if (this.move !== 2 && this.move !== 4) return;
+    this.sub_22960();
+    if (this.move === 2) this.y_pos = this.homeY + (this.offset >> 8);
+    else this.x_pos = this.homeX + (this.offset >> 8);
+  }
+  // sub_22960
+  sub_22960() {
+    if (this.wait) {
+      if (--this.wait === 0 && this.onScreen) this.game.sfx('spikemove');
+      return;
+    }
+    if (this.dir) {
+      const n = this.offset - 0x800;
+      if (n < 0) { this.offset = 0; this.dir = 0; this.wait = 60; } else this.offset = n;
+    } else {
+      this.offset += 0x800;
+      if (this.offset >= 0x2000) { this.offset = 0x2000; this.dir = 1; this.wait = 60; }
     }
   }
 }
 
+// =============================================================================
 // Obj_InvisibleBlock: solid box sized by subtype (only visible in debug mode).
 class InvisibleBlock extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.hw = (((this.subtype >> 4) & 0xf) + 1) * 8;
-    this.hh = ((this.subtype & 0xf) + 1) * 8;
+    this.priority = 0x200;
+    this.width_pixels = ((this.subtype & 0xf0) + 0x10) >> 1;
+    this.height_pixels = ((this.subtype & 0xf) + 1) << 3;
   }
-  update() { solidObject(this.game, this, this.hw, this.hh, this.hh); }
-  draw() {}
+  // loc_1C834
+  update() {
+    this.core.solidObjectFull2(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
+    this.deleteIfNotInRange();
+  }
 }
 
-// Obj_AIZLRZEMZRock: solid rock, broken by a rolling player (subtype selects size).
+// =============================================================================
+// Obj_AIZLRZEMZRock
 class Rock extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.map = game.maps(MAP.Rock);
-    this.art = 0x2333; // make_art_tile(ArtTile_AIZMisc1,1,0)
-    this.frame = (this.subtype >> 4) & 3;
-    const sizes = [[0x10, 0x28], [0x18, 0x18], [0x10, 0x10], [0x10, 0x10]];
-    [this.hw, this.hh] = sizes[this.frame] || [16, 16];
+    const f = (this.subtype >> 4) & 7;
+    this.mapping_frame = f;
+    const t = romBytes(game, TBL.RockSizes, 8);
+    this.width_pixels = t[(f & 3) * 2];
+    this.height_pixels = t[(f & 3) * 2 + 1];
+    this.y_radius = this.height_pixels;
+    this.mappings = game.maps(MAP.Rock);
+    this.art_tile = 0x2333; // make_art_tile(ArtTile_AIZMisc1,1,0)
+    if (game.zone.id === 0x001) {
+      this.mappings = game.maps(MAP.Rock2);
+      this.art_tile = 0x42e9; // make_art_tile(ArtTile_AIZMisc2,2,0)
+    }
+    this.priority = 0x200;
+    this.homeX = this.x_pos; // $2E
+    this.pushLeft = 0x40; // child_dx ($42 word)
+    this.pushTimer = 0; // $40
+    this.sideMode = (this.subtype & 4) !== 0; // loc_1D8E0
+    if (!this.sideMode) {
+      // loc_1D6EA: restore how far the rock was pushed
+      const d0 = this.respawnByte & 0x7f;
+      if (d0) {
+        this.x_pos = this.x_pos - d0;
+        this.pushLeft = 0x40 - d0;
+        this.y_pos = s16(this.y_pos + this.objCheckFloorDist());
+      }
+    }
   }
   update() {
-    const g = this.game, p = g.player;
-    if (isAttacking(p, g) && Math.abs(p.ground_vel) >= 0x480 && overlap(p, this.x, this.y, this.hw + 4, this.hh)) {
-      this.alive = false;
-      g.spawnExplosion(this.x, this.y);
-      g.sfx('destroy');
-      return;
+    return this.sideMode ? this.sideUpdate() : this.topUpdate();
+  }
+  // loc_1D712
+  topUpdate() {
+    const core = this.core, p = this.game.player;
+    const chain = core.chainBonus; // $38
+    const savedAnim = p.anim; // $32
+    const savedStatus = p.status; // $3A
+    core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
+    if (this.subtype & 2) this.sub_1DAD2(savedStatus);
+    if ((this.subtype & 1) && (this.status & P1_STANDING) && savedAnim === 2) {
+      // loc_1D7B0 -> sub_1D7CE: bounce the player up and smash
+      p.status |= S_ROLL;
+      p.y_radius = 0xe;
+      p.x_radius = 7;
+      p.anim = 2;
+      p.y_vel = -0x300;
+      p.status |= S_INAIR;
+      p.status &= ~S_ONOBJ;
+      p.routine = 2;
+      // loc_1D818
+      core.chainBonus = chain;
+      this.status &= 0xe7;
+      const f = this.mapping_frame;
+      return this.smash(f * 2, TBL.RockDebrisVel + this.game.rom.u16(TBL.RockDebrisVel + f * 2));
     }
-    solidObject(g, this, this.hw, this.hh, this.hh);
+    this.spriteOnScreenTest(this.homeX);
+  }
+  // loc_1D8E0: breakable by rolling into its side
+  sideUpdate() {
+    const core = this.core, p = this.game.player;
+    const savedXv = p.x_vel; // $30
+    core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
+    if ((core.d6 & TOUCH_SIDE) && !(this.subtype & 0x80)) {
+      const fire = (p.status_secondary & SS_FIRE) !== 0;
+      if ((fire || (this.status & P1_PUSHING)) && p.anim === 2 && Math.abs(savedXv) >= 0x480) {
+        // loc_1D97A -> sub_1DA08
+        this.status &= ~P1_PUSHING;
+        // sub_1DAA8
+        if (this.status & P1_STANDING) {
+          this.status &= ~P1_STANDING;
+          p.status |= S_INAIR;
+          p.status &= ~S_ONOBJ;
+        }
+        p.x_vel = savedXv;
+        p.x_pos = s16(p.x_pos + 4);
+        let a4 = TBL.RockDebrisSideL;
+        if (u16(this.x_pos) >= u16(p.x_pos)) {
+          p.x_pos = s16(p.x_pos - 8);
+          a4 = TBL.RockDebrisSideR;
+        }
+        p.ground_vel = p.x_vel;
+        p.status &= ~S_PUSH;
+        return this.smash(this.mapping_frame * 2, a4);
+      }
+    }
+    this.spriteOnScreenTest(this.homeX);
+  }
+  // sub_1DAD2 / sub_1DAFC: pushable rock (moves left one pixel every 17 frames)
+  sub_1DAD2(savedStatus) {
+    const p = this.game.player;
+    if (!(this.status & P1_PUSHING)) return;
+    if (u16(this.x_pos) >= u16(p.x_pos)) return;
+    if (!(savedStatus & S_PUSH)) return;
+    if (--this.pushTimer >= 0) return;
+    this.pushTimer = 0x10;
+    if (this.pushLeft === 0) return;
+    this.pushLeft--;
+    this.x_pos--;
+    p.x_pos--;
+    this.y_pos = s16(this.y_pos + this.objCheckFloorDist());
+    this.respawnByte = ((0x40 - this.pushLeft) & 0x7f) | 0x80;
+  }
+  // sub_1DB60: break into debris (this object becomes the first fragment)
+  smash(d0, a4) {
+    const g = this.game, rom = g.rom, core = this.core;
+    let a3 = TBL.RockDebrisPos + rom.u16(TBL.RockDebrisPos + d0);
+    const n = rom.u16(a3) + 1;
+    a3 += 2;
+    const x = this.x_pos, y = this.y_pos;
+    let d6 = 3;
+    for (let k = 0; k < n; k++) {
+      const frag = new RockFragment(g, x + rom.s8(a3 + k * 2), y + rom.s8(a3 + k * 2 + 1));
+      frag.mappings = this.mappings;
+      frag.render_flags = this.render_flags;
+      frag.art_tile = this.art_tile | 0x8000;
+      frag.x_vel = rom.s16(a4 + k * 4);
+      frag.y_vel = rom.s16(a4 + k * 4 + 2);
+      frag.mapping_frame = d6;
+      if (++d6 >= 7) d6 = 3;
+      if (k === 0) core.replace(this, frag); else core.spawn(frag);
+    }
+    g.sfx('destroy'); // sfx_Collapse
   }
 }
 
-// Obj_FloatingPlatform (AIZ): top-solid platform moving on a sine path.
+// loc_1D836: rock debris
+class RockFragment extends Obj {
+  constructor(game, x, y) {
+    super(game, { x, y });
+    this.priority = 0x80;
+    this.width_pixels = 0x18;
+  }
+  update() {
+    this.anim_frame_timer = (this.anim_frame_timer - 1) & 0xff;
+    if (this.anim_frame_timer & 0x80) {
+      this.anim_frame_timer = 2;
+      let d0 = this.mapping_frame + 1;
+      if (d0 >= 7) d0 = 3;
+      this.mapping_frame = d0;
+    }
+    this.moveSprite2();
+    this.y_vel = s16(this.y_vel + 0x18);
+    if (!this.onScreen) return this.delete();
+    this.display();
+  }
+}
+
+// =============================================================================
+// Obj_FloatingPlatform
 class FloatingPlatform extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.map = game.maps(MAP.FloatingPlatform);
-    this.art = 0x43f7;
-    this.bx = this.x; this.by = this.y;
-    this.t = 0;
+    const z = game.zone.id;
+    this.mappings = game.maps(MAP.FloatingPlatform);
+    this.art_tile = 0x43f7; // make_art_tile(ArtTile_AIZFloatingPlatform,2,0)
+    if (z === 0x001) this.art_tile = 0x4440;
+    if ((z >> 8) === 1) { this.mappings = game.maps(MAP.HCZFloatingPlatform); this.art_tile = 0x441d; }
+    if ((z >> 8) === 2) { this.mappings = game.maps(MAP.MGZFloatingPlatform); this.art_tile = 0x4001; }
+    this.priority = 0x180;
+    const a2 = TBL.PlatformSizes + ((this.subtype >> 2) & 0x1c);
+    const rom = game.rom;
+    this.width_pixels = rom.u8[a2];
+    this.height_pixels = rom.u8[a2 + 1];
+    this.mapping_frame = rom.u8[a2 + 2];
+    this.x30 = this.x_pos;
+    this.x32 = this.x_pos;
+    this.y34 = this.y_pos;
+    this.dir2e = this.status & 0xff;
+    this.range42 = 0x280;
+    this.x44 = this.x_pos;
+    this.sink3a = 0;
+    this.v40 = 0;
+    this.p36 = 0;
+    this.flag3c = 0;
+    const d0 = (this.subtype & 0xf) - 8;
+    if (d0 >= 0) {
+      if (d0 < 4) {
+        if (this.core.oscWord(0x2c + d0 * 4) & 0x8000) this.dir2e ^= 1;
+      } else {
+        this.range42 = 0x380;
+        this.x44 += 0x100;
+      }
+    }
     this.kind = this.subtype & 0xf;
   }
+  // loc_244EA
   update() {
-    const g = this.game;
-    this.t = (g.frameCount * 1.4) % 256;
-    const s = Math.sin((this.t / 256) * Math.PI * 2);
-    const ox = this.x, oy = this.y;
-    if (this.kind === 1) this.x = this.bx + Math.round(s * 0x40);
-    else if (this.kind === 2) this.y = this.by + Math.round(s * 0x40);
-    else if (this.kind >= 3) this.y = this.by + Math.round(s * 0x20);
-    if (this.standing) g.player.x_pos += this.x - ox;
-    void oy;
-    solidObject(g, this, 0x20, 8, 8, true);
+    const oldX = this.x_pos;
+    this.move();
+    if (this.onScreen) this.core.solidObjectTop(this, this.width_pixels, this.height_pixels + 1, oldX);
+    if (u16((this.x44 & 0xff80) - this.core.coarseBack) > this.range42) return this.unload();
+    this.display();
+  }
+  osc(o) { return this.core.oscByte(o); }
+  move() {
+    switch (this.kind) {
+      case 0: return this.stationary();
+      case 1: return this.horizontal(64, this.osc(0x0a));
+      case 2: return this.horizontal(128, this.osc(0x1e));
+      case 3: return this.vertical(64, this.osc(0x0a));
+      case 4: return this.vertical(128, this.osc(0x1e));
+      case 5: // Platform_DiagonalUp
+        this.horizontal(128, this.osc(0x1e));
+        return this.vertical(64, this.osc(0x1e) >> 1);
+      case 6: // Platform_DiagonalDown
+        this.horizontal(128, 128 - this.osc(0x1e));
+        return this.vertical(64, this.osc(0x1e) >> 1);
+      case 7: return this.rising();
+      case 8: return this.square(16, this.osc(0x2a) >> 1, this.core.oscWord(0x2c));
+      case 9: return this.square(48, this.osc(0x2e), this.core.oscWord(0x30));
+      case 10: return this.square(80, this.osc(0x32), this.core.oscWord(0x34));
+      case 11: return this.square(112, this.osc(0x36), this.core.oscWord(0x38));
+      case 12: return this.horizontal256();
+      default: return this.stationary();
+    }
+  }
+  // Platform_Stationary: sinks a little while stood on
+  stationary() {
+    if (this.status & 0x18) { if (this.sink3a !== 0x40) this.sink3a += 4; }
+    else if (this.sink3a) this.sink3a -= 4;
+    const [sin] = this.core.sincos(this.sink3a);
+    this.y_pos = this.y34 + (sin >> 6);
+  }
+  // sub_23ED4
+  horizontal(d1, d0) {
+    if (this.status & 1) d0 = d1 - d0;
+    this.x_pos = this.x30 + d0;
+  }
+  // loc_23F02
+  vertical(d1, d0) {
+    if (this.status & 1) d0 = d1 - d0;
+    this.y_pos = this.y34 - d0;
+  }
+  // Platform_Square32..224 (loc_241AE)
+  square(d1, d0, d3) {
+    if (d3 === 0) this.dir2e = (this.dir2e + 1) & 3;
+    const d2 = this.dir2e & 3;
+    if (d2 === 0) {
+      this.x_pos = this.x30 + d0 - d1;
+      this.y_pos = this.y34 - d1;
+    } else if (d2 === 1) {
+      this.y_pos = this.y34 - (d0 - (d1 - 1));
+      this.x_pos = this.x30 + d1;
+    } else if (d2 === 2) {
+      this.x_pos = this.x30 - (d0 - (d1 - 1));
+      this.y_pos = this.y34 + d1;
+    } else {
+      this.y_pos = this.y34 + d0 - d1;
+      this.x_pos = this.x30 - d1;
+    }
+  }
+  // Platform_Horizontal256
+  horizontal256() {
+    const d2 = 0x7f;
+    if (!this.flag3c) {
+      this.v40 = s16(this.v40 + 4);
+      this.p36 = u16(this.p36 + this.v40);
+      if (!(d2 > (this.p36 >> 8))) this.flag3c = 1;
+    } else {
+      this.v40 = s16(this.v40 - 4);
+      this.p36 = u16(this.p36 + this.v40);
+      if (!(d2 <= (this.p36 >> 8))) this.flag3c = 0;
+    }
+    let d0 = this.p36 >> 8;
+    if (this.status & 1) d0 = d2 - d0;
+    this.x_pos = this.x30 + d0;
+  }
+  // Platform_Rising (ceiling stop/crush check not ported: stops $80 above its start)
+  rising() {
+    if (!this.flag3c) {
+      if (this.status & 0x18) { this.flag3c = 1; this.y_radius = 0xc; }
+      return;
+    }
+    this.moveSprite2();
+    if (!(u16(this.y34 - 0x80) >= u16(this.y_pos))) this.y_vel = s16(this.y_vel - 8);
+    else { this.y_pos = this.y34 - 0x80; this.y_vel = 0; this.flag3c = 0; }
   }
 }
 
-// Obj_CollapsingPlatform: top-solid ledge that falls after being stood on.
+// =============================================================================
+// Obj_CollapsingPlatform: collapses into its mapping pieces after being stood on.
 class CollapsingPlatform extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.timer = -1;
-    this.vy = 0;
-  }
-  update() {
-    const g = this.game;
-    if (this.timer < 0) {
-      if (solidObject(g, this, 0x30, 8, 8, true) === 'top') this.timer = 7;
-      return;
+    const z = game.zone.id;
+    this.mappings = game.maps(z === 0x001 ? MAP.CollapsingPlatform2 : MAP.CollapsingPlatform);
+    this.art_tile = 0x4001; // make_art_tile($001,2,0)
+    this.timers = romBytes(game, TBL.CollapseTimers, 30); // $30
+    this.slope = romBytes(game, TBL.CollapseSlope, 0x40); // $3C
+    this.width_pixels = 0x3c;
+    this.height_pixels = 0x20;
+    if ((z >> 8) === 5) {
+      this.mappings = game.maps(MAP.ICZCollapsingBridge);
+      this.timers = romBytes(game, TBL.ICZCollapseTimers, 32);
+      this.slope = romBytes(game, TBL.ICZCollapseSlope, 0x30);
+      this.width_pixels = 0x30;
+      this.height_pixels = 0x30;
     }
-    if (this.timer > 0) { this.timer--; solidObject(g, this, 0x30, 8, 8, true); return; }
-    // falling: release player
-    if (this.standing) { this.standing = false; g.standingOn = null; g.player.status &= ~STATUS_ON_OBJ; g.player.status |= STATUS_IN_AIR; }
-    this.vy += 0.22; this.y += this.vy;
-    if (this.y > g.level.heightPx + 256) this.alive = false;
+    this.priority = 0x280;
+    this.timer38 = 7;
+    this.mapping_frame = this.subtype;
+    this.status |= 0x80;
+    this.touched3a = 0;
   }
-  draw() {}
+  // loc_1DEB2
+  update() {
+    if (this.touched3a) {
+      if (this.timer38 === 0) return this.createFragments();
+      this.timer38--;
+    }
+    if (this.status & 0x18) this.touched3a = 1;
+    this.sub_1DED4();
+  }
+  // sub_1DED4
+  sub_1DED4() {
+    this.core.solidObjectTopSloped2(this, this.width_pixels, this.slope, this.x_pos);
+    this.spriteOnScreenTest();
+  }
+  // ObjPlatformCollapse_CreateFragments / ObjPlatformCollapse_SmashObject
+  createFragments() {
+    const g = this.game, core = this.core;
+    this.mapping_frame += 2;
+    const pieces = this.mappings[this.mapping_frame] || [];
+    const me = new CollapseFragment(g, this.x_pos, this.y_pos, this, true);
+    me.pieces = pieces.slice(0, 1);
+    me.timer38 = this.timers[0];
+    core.replace(this, me);
+    me.respawn = -1;
+    for (let k = 1; k < pieces.length; k++) {
+      const f = new CollapseFragment(g, this.x_pos, this.y_pos, this, false);
+      f.pieces = [pieces[k]];
+      f.timer38 = this.timers[k] ?? 0;
+      core.spawn(f);
+    }
+    me.display();
+    // FragmentsDrawAndPlaySfx: the layout entry may load again later
+    if (this.respawn >= 0) core.respawnTable[this.respawn] &= 0x7f;
+    g.sfx('destroy'); // sfx_Collapse
+  }
 }
 
-// Obj_StarPost: checkpoint.
+// loc_1DEEC
+class CollapseFragment extends Obj {
+  constructor(game, x, y, parent, first) {
+    super(game, { x, y });
+    this.render_flags = parent.render_flags | 0x20;
+    this.status = first ? parent.status : 0;
+    this.art_tile = parent.art_tile;
+    this.priority = parent.priority;
+    this.width_pixels = parent.width_pixels;
+    this.height_pixels = parent.height_pixels;
+    this.slope = parent.slope;
+    this.touched3a = first ? 1 : 0;
+  }
+  update() {
+    if (this.timer38 === 0) {
+      // loc_1DF3C
+      this.moveSprite();
+      if (!this.onScreen) return this.delete();
+      return this.display();
+    }
+    if (!this.touched3a) {
+      this.timer38--;
+      return this.display();
+    }
+    // loc_1DF00
+    this.core.solidObjectTopSloped2(this, this.width_pixels, this.slope, this.x_pos);
+    this.spriteOnScreenTest();
+    if (--this.timer38 === 0) {
+      // sub_1DF18
+      const p = this.game.player;
+      if (this.status & P1_STANDING) {
+        this.status &= ~P1_STANDING;
+        p.status &= ~(S_ONOBJ | S_PUSH);
+        p.status |= S_INAIR;
+        p.prev_anim = 1;
+      }
+    }
+  }
+}
+
+// =============================================================================
+// Obj_StarPost
 class StarPost extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.map = game.maps(MAP.StarPost);
-    this.art = 0x5ec;
-    this.active = false;
-    this.spin = 0;
+    // loc_2C436
+    this.routine = 2;
+    this.mappings = game.maps(MAP.StarPost);
+    this.art_tile = 0x5ec; // make_art_tile(ArtTile_StarPost+8,0,0)
+    this.width_pixels = 8;
+    this.height_pixels = 0x28;
+    this.priority = 0x280;
+    if ((this.respawnByte & 1) || (this.core.lastStarPost & 0x7f) >= (this.subtype & 0x7f)) {
+      this.respawnByte = this.respawnByte | 1;
+      this.anim = 2;
+    }
   }
   update() {
-    const g = this.game, p = g.player;
-    if (!this.active && overlap(p, this.x, this.y, 8, 0x28)) {
-      this.active = true;
-      this.spin = 32;
-      g.checkpoint = { x: this.x, y: this.y, time: g.time };
-      g.sfx('starpost');
-    }
-    if (this.spin > 0) this.spin--;
-    this.frame = 0;
+    if (this.routine === 2) this.sub_2C49E();
+    // loc_2C56E
+    this.animateSprite(ANI.Starpost);
+    this.spriteOnScreenTest();
   }
-  draw(vdp, cx, cy) {
-    if (!this.map) return;
-    // Map_StarPost: 0 = idle (red lamp), 1 = pole only, 3 = gold lamp, 4 = activated
-    const sx = this.x - cx, sy = this.y - cy;
-    if (!this.spin) { vdp.addSprite(this.map[this.active ? 4 : 0], sx, sy, this.art, false, false, 0x280); return; }
-    vdp.addSprite(this.map[1], sx, sy, this.art, false, false, 0x280);
-    const a = (this.spin / 32) * Math.PI * 4;
-    vdp.addSprite(this.map[3], sx + Math.round(Math.sin(a) * 8), sy - 24 - Math.round(Math.cos(a) * 8), this.art, false, false, 0x280);
+  // sub_2C49E
+  sub_2C49E() {
+    const g = this.game, core = this.core, p = g.player;
+    if ((core.lastStarPost & 0x7f) >= (this.subtype & 0x7f)) {
+      if (this.anim === 0) this.anim = 2;
+      return;
+    }
+    if (u16(p.x_pos - this.x_pos + 8) >= 0x10) return;
+    if (u16(p.y_pos - this.y_pos + 0x40) >= 0x68) return;
+    g.sfx('starpost');
+    core.spawn(new StarPostBall(g, this));
+    // (50+ rings: the bonus stage stars of sub_2C83E are not ported)
+    this.anim = 1;
+    // sub_2C5DA / Save_Level_Data
+    core.lastStarPost = this.subtype;
+    g.checkpoint = { x: this.x_pos, y: this.y_pos, time: g.time, starpost: this.subtype };
+    this.routine = 4;
+    this.respawnByte = this.respawnByte | 1;
   }
 }
 
+// loc_2C580: the ball spinning around the starpost's head
+class StarPostBall extends Obj {
+  constructor(game, parent) {
+    super(game, { x: parent.x_pos, y: parent.y_pos });
+    this.cx = parent.x_pos; // $30
+    this.cy = parent.y_pos - 0x14; // $32
+    this.mappings = parent.mappings;
+    this.art_tile = parent.art_tile;
+    this.width_pixels = 8;
+    this.height_pixels = 8;
+    this.priority = 0x200;
+    this.mapping_frame = 2;
+    this.timer = 0x20; // $36
+    this.parent = parent;
+    this.angle = 0;
+  }
+  update() {
+    if (--this.timer < 0) {
+      const a1 = this.parent;
+      if (a1.alive && a1 instanceof StarPost) { a1.anim = 2; a1.mapping_frame = 0; }
+      return this.delete();
+    }
+    let d0 = this.angle;
+    this.angle = (this.angle - 0x10) & 0xff;
+    d0 = (d0 - 0x40) & 0xff;
+    const [sin, cos] = this.core.sincos(d0);
+    this.x_pos = ((cos * 0xc00) >> 16) + this.cx;
+    this.y_pos = ((sin * 0xc00) >> 16) + this.cy;
+    this.spriteOnScreenTest();
+  }
+}
+
+// =============================================================================
 // Obj_AIZForegroundPlant ($2B72E): foreground foliage. Subtype high nybble picks a
 // parallax routine (loc_2B7AE..): pos = home + ((home - screen centre - camera) >> shift).
 class Plant extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.map = game.maps(MAP.Plant);
-    this.art = 0xc333; // make_art_tile(ArtTile_AIZMisc1,2,1)
-    this.frame = this.subtype & 1;
+    this.mappings = game.maps(MAP.Plant);
+    this.art_tile = 0xc333; // make_art_tile(ArtTile_AIZMisc1,2,1)
+    this.mapping_frame = this.subtype & 1;
     this.shift = [0, 4, 3, 2, 1, 1, 1][(this.subtype >> 4) & 7] ?? 0;
-    this.order = 0;
+    this.priority = 0;
+    this.width_pixels = 0x20;
+    this.height_pixels = 0x20;
   }
+  update() { this.spriteOnScreenTest(); }
   draw(vdp, cx, cy) {
-    let x = this.x, y = this.y;
+    let x = this.x_pos, y = this.y_pos;
     if (this.shift) {
-      x += (this.x - 160 - cx) >> this.shift;
-      y += (this.y - 112 - cy) >> this.shift;
+      x += (this.x_pos - 160 - cx) >> this.shift;
+      y += (this.y_pos - 112 - cy) >> this.shift;
     }
-    const pieces = this.map && this.map[this.frame];
-    if (pieces) vdp.addSprite(pieces, x - cx, y - cy, this.art, this.xflip, this.yflip, 0);
+    const pieces = this.mappings && this.mappings[this.mapping_frame];
+    if (pieces) vdp.addSprite(pieces, x - cx, y - cy, this.art_tile, this.xflip, this.yflip, 0);
   }
 }
 
-// --- Badniks -----------------------------------------------------------------
+// =============================================================================
+// Badniks (behaviour still approximate; to be rewritten). They interact with the
+// player only through Touch_Response: collision_flags + Sprite_CheckDeleteTouch.
 
 class Badnik extends Obj {
   constructor(game, d) {
     super(game, d);
-    this.order = 0x280;
+    this.priority = 0x280;
+    this.width_pixels = 0x14;
+    this.height_pixels = 0x10;
+    this.collision_flags = 0x0b;
   }
-  hitbox() { return [12, 12]; }
   update() {
-    const g = this.game, p = g.player;
     this.think();
-    const [hw, hh] = this.hitbox();
-    if (!p.dead && overlap(p, this.x, this.y, hw, hh)) {
-      if (isAttacking(p, g)) {
-        this.alive = false;
-        g.destroyBadnik(this);
-      } else if (!p.invulnerable_time) {
-        g.hurtPlayer(this.x, false);
-      }
-    }
+    this.spriteCheckDeleteTouch();
   }
   think() {}
+  draw(vdp, cx, cy) {
+    const pieces = this.mappings && this.mappings[this.mapping_frame];
+    if (pieces) vdp.addSprite(pieces, Math.floor(this.x) - cx, Math.floor(this.y) - cy, this.art_tile, this.xflip, this.yflip, this.priority);
+  }
 }
 
 // Obj_Rhinobot: patrols, accelerates towards Sonic and skids when turning.
@@ -470,11 +1063,10 @@ class Rhinobot extends Badnik {
     this.lastDplc = -1;
     this.animT = 0;
     this.skid = 0;
-    this.fall = 0;
+    this.collision_flags = 0x0b;
   }
   think() {
     const g = this.game, L = g.level, p = g.player;
-    // charge when player is ahead on the same level
     const dx = p.x_pos - this.x;
     const ahead = Math.sign(dx) === this.dir && Math.abs(dx) < 0x60 && Math.abs(p.y_pos - this.y) < 0x20;
     const max = ahead ? 0x400 : 0x300;
@@ -485,7 +1077,6 @@ class Rhinobot extends Badnik {
     } else {
       this.vx += this.dir * 0x10;
       if (Math.abs(this.vx) > max) this.vx = Math.sign(this.vx) * max;
-      // turn at walls / ledges
       const fx = this.x + this.dir * 12;
       const wall = L.solidAt(fx, this.y, 0, false) || L.solidAt(fx, this.y - 8, 0, false);
       const ledge = !L.solidAt(fx, this.y + 20, 0) && !L.solidAt(fx, this.y + 28, 0);
@@ -494,24 +1085,17 @@ class Rhinobot extends Badnik {
       }
     }
     this.x += this.vx / 256;
-    // stick to floor
     for (let i = 0; i < 16 && !L.solidAt(this.x, this.y + 16, 0); i++) this.y++;
     for (let i = 0; i < 16 && L.solidAt(this.x, this.y + 15, 0); i++) this.y--;
     this.xflip = this.dir > 0 ? !(this.skid > 0) : this.skid > 0;
-    // frames: 0-3 run cycle, 4-7 dust (children); skid = frame 0
     this.animT = (this.animT + 1) % 16;
     this.frame = this.skid > 0 ? 0 : [0, 1, 2, 3][(this.animT >> 2) & 3];
-    if (this.frame !== this.lastDplc) {
-      this.lastDplc = this.frame;
-      this.game.objectDPLC(0x16732a, 0x16156e, this.frame, this.art);
-    }
   }
   homeX() { return this.home ?? (this.home = this.x); }
-  hitbox() { return [16, 14]; }
   draw(vdp, cx, cy) {
     // DPLC must match the frame being drawn: reload right before queueing
     this.game.objectDPLC(0x16732a, 0x16156e, this.frame, this.art);
-    vdp.addSprite(this.map[this.frame], this.x - cx, this.y - cy, this.art, this.xflip, false, this.order);
+    super.draw(vdp, cx, cy);
   }
 }
 
@@ -522,6 +1106,9 @@ class Bloominator extends Badnik {
     this.map = game.maps(MAP.Bloominator);
     this.art = 0x252a;
     this.t = 0;
+    this.collision_flags = 0x23;
+    this.width_pixels = 0xc;
+    this.height_pixels = 0x18;
   }
   think() {
     this.t = (this.t + 1) % 160;
@@ -530,7 +1117,6 @@ class Bloominator extends Badnik {
       for (const dir of [-1, 1]) this.game.spawnProjectile(this.x + dir * 4, this.y - 20, dir * 0x100, -0x500, this.map, 4, this.art);
     }
   }
-  hitbox() { return [12, 20]; }
 }
 
 // Obj_MonkeyDude: climbs on palm trees and throws coconuts.
@@ -541,6 +1127,7 @@ class MonkeyDude extends Badnik {
     this.art = 0x2548;
     this.t = 0;
     this.by = this.y;
+    this.collision_flags = 0x0b;
   }
   think() {
     const p = this.game.player;
@@ -553,8 +1140,9 @@ class MonkeyDude extends Badnik {
       this.game.spawnProjectile(this.x + dir * 12, this.y - 8, dir * 0x200, -0x300, this.map, 6, this.art);
     }
   }
-  hitbox() { return [12, 14]; }
 }
+
+export { Projectile };
 
 const TYPES = {
   1: Monitor, 2: PathSwap, 4: CollapsingPlatform, 5: Rock, 7: Spring, 8: Spikes,

@@ -807,6 +807,7 @@ export class Player {
     // (original bug kept: low byte of d0 was overwritten by the angle check)
     if (s16(d0 & 0xff00) < 0x400) return;
     if (this.flip_type & 0x80) return;
+    this.onSound?.('skid'); // sfx_Skid
     this.anim = 0xd; // skid
     this.status &= ~S_FACING;
   }
@@ -835,6 +836,7 @@ export class Player {
     if (((this.angle + 0x20) & 0xc0) !== 0) return;
     if (s16(d0 & 0xff00) > -0x400) return;
     if (this.flip_type & 0x80) return;
+    this.onSound?.('skid'); // sfx_Skid
     this.anim = 0xd;
     this.status |= S_FACING;
   }
@@ -992,6 +994,7 @@ export class Player {
     this.x_radius = 7;
     this.anim = 2;
     this._addY(5);
+    this.onSound?.('roll'); // sfx_Roll
     if (this.ground_vel === 0) this.ground_vel = 0x200;
   }
 
@@ -1008,6 +1011,7 @@ export class Player {
     this.status &= ~S_PUSH;
     this.jumping = 1;
     this.stick_to_convex = 0;
+    this.onSound?.('jump'); // sfx_Jump
     this.y_radius = this.default_y_radius;
     this.x_radius = this.default_x_radius;
     if (this.status & S_ROLL) {
@@ -1105,6 +1109,7 @@ export class Player {
       this.anim = 2;
       this._addY(5);
       this.spin_dash_flag = 0;
+      this.onSound?.('release'); // sfx_Dash
       this.ground_vel = SPINDASH_SPEEDS[this.spin_dash_counter >> 8];
       // loc_12BDE: H_scroll_frame_offset = $2000 - ((speed - $800) * 2 & $1F00) (camera lag,
       // consumed by MoveCameraX in camera.js)
@@ -1397,6 +1402,7 @@ export class Player {
     this.status |= S_ROLL;
     this._addY(-s8(this.y_radius - this.default_y_radius));
     this.shield_anim = 2;
+    this.onSound?.('bubble'); // sfx_BubbleAttack
   }
 
   // ================================================================ hurt / death
@@ -1426,6 +1432,7 @@ export class Player {
     this.anim = 0x1a;
     this.invulnerable_time = 120;
     this.spin_dash_flag = 0;
+    this.onSound?.('hurt'); // sfx_Death
     return true;
   }
 
@@ -1441,9 +1448,11 @@ export class Player {
     this.x_vel = 0;
     this.ground_vel = 0;
     this.anim = 0x18;
+    this.highPriority = true; // bset #7,art_tile(a0)
     this.spin_dash_flag = 0;
     this.invulnerable_time = 0;
     this.visible = true;
+    this.onSound?.('death'); // sfx_Death
     this._deathCamY = this.cameraY ?? this.y_pos - this.distance_from_top;
   }
 
