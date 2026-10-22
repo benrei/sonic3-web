@@ -1,0 +1,11 @@
+{
+  "name": "sonic3-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun serve.ts",
+    "test": "bun tools/test-player.mjs .local/sonic3.bin",
+    "render": "bun tools/render-level.mjs .local/sonic3.bin",
+    "play": "bun tools/play.mjs .local/sonic3.bin"
+  }
+}

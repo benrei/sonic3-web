@@ -1,0 +1,4 @@
+# Never commit ROMs or extracted game data
+.local/
+*.bin
+*.md.bin
