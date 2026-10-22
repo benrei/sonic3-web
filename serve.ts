@@ -6,6 +6,7 @@ const port = Number(process.env.PORT ?? 8333);
 
 Bun.serve({
   port,
+  hostname: process.env.HOST ?? "127.0.0.1",
   async fetch(req) {
     let path = decodeURIComponent(new URL(req.url).pathname);
     if (path.endsWith("/")) path += "index.html";
