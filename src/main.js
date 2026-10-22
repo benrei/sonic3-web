@@ -95,6 +95,8 @@ function startZone(i, keepCheckpoint = false) {
   if (keepCheckpoint && game?.checkpoint) state.checkpoint = game.checkpoint;
   game = new Game(rom, i, audio, state);
   paused = false;
+  // swallow the key that started the zone so it doesn't immediately pause the game
+  for (const k of Object.keys(held)) if (held[k]) prevHeld[k] = true;
 }
 
 // ---------------- Input ----------------

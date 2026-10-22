@@ -447,14 +447,14 @@ export class Game {
     const secs = Math.floor(this.time / 60);
     writeGlyphs(R + 0x36, `${Math.min(9, Math.floor(secs / 60))}:${String(secs % 60).padStart(2, '0')}`);
     writeGlyphs(R + 0x3e, String(this.rings).padStart(3, ' '));
-    // lives: two 8x8 digits at ArtTile_PlayerLifeIcon+9
+    // lives: two 8x8 digits at ArtTile_PlayerLifeIcon+9 and +11
     const lives = Math.max(0, Math.min(99, this.lives));
     const lv = String(lives).padStart(2, ' ');
     let v = (0x7d4 + 9) * 32;
     for (const ch of lv) {
       const d = ch === ' ' ? null : this.rom.u8.subarray(LIVES_DIGITS + (+ch) * 32, LIVES_DIGITS + (+ch) * 32 + 32);
       this.vdp.writeVram(v, d ?? new Uint8Array(32));
-      v += 32;
+      v += 64; // HUD_Lives: digits are $40 bytes apart (tiles +9 and +11)
     }
     // frame 0 normal; flashing red RINGS (frame 1) when zero rings, TIME (2) after 9 minutes
     const flash = (this.frameCount >> 3) & 1;
