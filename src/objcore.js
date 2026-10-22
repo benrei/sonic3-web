@@ -561,7 +561,7 @@ export class ObjCore {
   addScore(d0) {
     const g = this.game;
     g.score = Math.min(9999990, g.score + d0 * 10);
-    if (g.nextExtraLife === undefined) g.nextExtraLife = (Math.floor(g.score / 50000) + 1) * 50000;
+    if (g.nextExtraLife === undefined) g.nextExtraLife = 50000;
     if (g.score >= g.nextExtraLife) {
       g.nextExtraLife += 50000;
       g.lives++;

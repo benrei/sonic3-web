@@ -964,7 +964,9 @@ class StarPost extends Obj {
     this.anim = 1;
     // sub_2C5DA / Save_Level_Data
     core.lastStarPost = this.subtype;
-    g.checkpoint = { x: this.x_pos, y: this.y_pos, time: g.time, starpost: this.subtype };
+    const pl = g.player;
+    g.checkpoint = { x: this.x_pos, y: this.y_pos, time: g.time, starpost: this.subtype,
+      top_solid_bit: pl.top_solid_bit, lrb_solid_bit: pl.lrb_solid_bit, highPriority: !!pl.highPriority };
     this.routine = 4;
     this.respawnByte = this.respawnByte | 1;
   }

@@ -39,6 +39,10 @@ export class Game {
     this.rings = 0;
     this.score = state.score ?? 0;
     this.lives = state.lives ?? 3;
+    // Next_extra_life_score starts at 5000 (x10) and persists across acts
+    this.nextExtraLife = state.nextExtraLife ?? 50000;
+    this.timeOver = false;
+    this.results = null;
     this.time = 0; // frames
     this.frameCount = 0;
     this.checkpoint = state.checkpoint ?? null;
@@ -66,10 +70,14 @@ export class Game {
 
   spawnPlayer() {
     const p = this.player;
+    // Load_Starpost_Settings: position, collision layer, priority and timer
     if (this.checkpoint) {
-      p.x_pos = this.checkpoint.x;
-      p.y_pos = this.checkpoint.y;
-      this.time = this.checkpoint.time;
+      const c = this.checkpoint;
+      p.x_pos = c.x;
+      p.y_pos = c.y;
+      if (c.top_solid_bit) { p.top_solid_bit = c.top_solid_bit; p.lrb_solid_bit = c.lrb_solid_bit; }
+      if (c.highPriority !== undefined) p.highPriority = c.highPriority;
+      this.time = c.time;
     }
   }
 
@@ -106,12 +114,15 @@ export class Game {
     this.animator.update();
     if (this.actClear > 0) {
       this.actClear++;
+      this.updateResults();
       if (this.actClear > 1) input = { held: { right: true }, pressed: {} };
     }
     if (this.gameOver) return;
 
-    if (!p.dead && this.titleCard < 100) {
-      if (!this.actClear && this.time < 10 * 60 * 60 - 1) this.time++;
+    // Level timer (HUD_Update): stops at 9:59 and kills the player (UpdateHUD_TimeOver)
+    if (p.routine < 8 && !p.dead && this.titleCard < 100 && !this.actClear) {
+      if (this.time < 10 * 60 * 60 - 1) this.time++;
+      else if (!this.timeOver && p.routine === 2) { this.timeOver = true; p.kill(); }
     }
     const freeze = this.titleCard > 110;
     if (!freeze) {
@@ -132,20 +143,48 @@ export class Game {
     if (!freeze) this.core.afterCamera();
 
     // reached the end of the act?
-    if (!this.actClear && p.x_pos >= this.endX && !p.dead) {
-      this.actClear = 1;
-      this.score += Math.max(0, 50000 - Math.floor(this.time / 60) * 100) + this.rings * 100;
-      this.sfx('clear');
+    if (!this.actClear && p.x_pos >= this.endX && !p.dead) this.startResults();
+  }
+
+  // Obj_LevelResultsInit: time bonus from TimeBonus[min(secs/30, 7)] (x10 points),
+  // 9:59 gives 10000, ring bonus = rings * 10.
+  startResults() {
+    this.actClear = 1;
+    const secs = Math.floor(this.time / 60);
+    const TIME_BONUS = 0x2d15e; // TimeBonus: 5000, 5000, 1000, 500, 400, 300, 100, 10
+    const timeBonus = secs === 9 * 60 + 59 ? 10000 : this.rom.u16(TIME_BONUS + Math.min(7, Math.floor(secs / 30)) * 2);
+    this.results = { time: timeBonus, ring: this.rings * 10, total: 0, wait: 6 * 60, done: false, after: 0 };
+  }
+  // Obj_LevelResultsWait: count both bonuses down 10 per frame into the score
+  updateResults() {
+    const r = this.results;
+    if (!r || r.done) { if (r?.done && ++r.after >= 90) this.resultsDone = true; return; }
+    if (r.wait > 0) {
+      if (--r.wait === 289) this.sfx('clear'); // mus_GotThroughAct
+      return;
+    }
+    let d0 = 0;
+    if (r.time) { d0 += 10; r.time -= 10; }
+    if (r.ring) { d0 += 10; r.ring -= 10; }
+    r.total += d0;
+    if (d0) {
+      this.core.addScore(d0);
+      if ((this.frameCount & 3) === 0) this.sfx('tick'); // sfx_Switch
+    } else {
+      this.sfx('register'); // sfx_Register
+      r.done = true;
     }
   }
 
+  // Death (loc_1328A): one life is taken when the player reaches routine 8;
+  // reaching zero is game over, otherwise the level restarts 60 frames later.
   handleDeath() {
-    this.deathTimer++;
-    if (this.deathTimer > 150) {
-      this.lives--;
-      if (this.lives < 0) { this.gameOver = true; return; }
-      this.restartRequested = true;
+    if (!this.player.dead) return;
+    if (this.deathTimer++ === 0) {
+      this.lives = Math.max(0, this.lives - 1);
+      if (this.lives === 0) { this.gameOver = true; return; }
     }
+    if (this.deathTimer > 60) this.restartRequested = true;
   }
 
   // Sound effects are played by the player code itself at the original Play_SFX
@@ -330,9 +369,12 @@ export class Game {
       v += 64; // HUD_Lives: digits are $40 bytes apart (tiles +9 and +11)
     }
     // frame 0 normal; flashing red RINGS (frame 1) when zero rings, TIME (2) after 9 minutes
-    const flash = (this.frameCount >> 3) & 1;
+    // Render_HUD: while bit 3 of the frame counter is clear, RINGS (+1) and, from 9:00, TIME (+2) turn red
     let f = 0;
-    if (this.rings === 0 && flash) f = 1;
+    if (!(this.frameCount & 8)) {
+      if (this.rings === 0) f += 1;
+      if (Math.floor(this.time / 3600) >= 9) f += 2;
+    }
     this.vdp.addSprite(this.hudMap[f], 0x8f - 0x80, 0x108 - 0x80, 0x8000 | (R + 0xe), false, false, 0);
   }
 
@@ -340,8 +382,9 @@ export class Game {
   drawOverlays() {
     this.overlay = null;
     if (this.titleCard > 0) this.overlay = { kind: 'title', t: this.titleCard };
-    else if (this.actClear > 0) this.overlay = { kind: 'clear', t: this.actClear };
-    else if (this.gameOver) this.overlay = { kind: 'gameover' };
+    else if (this.actClear > 0) this.overlay = { kind: 'clear', t: this.actClear, results: this.results };
+    else if (this.gameOver) this.overlay = { kind: this.timeOver ? 'timeover-gameover' : 'gameover' };
+    else if (this.timeOver) this.overlay = { kind: 'timeover' };
   }
 }
 

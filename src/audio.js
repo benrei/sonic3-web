@@ -3,12 +3,24 @@
 export class Audio {
   constructor() {
     this.ctx = null;
-    this.muted = false;
+    this.master = null;
+    this._muted = false;
+    this.noiseBuffers = new Map();
+  }
+  get muted() { return this._muted; }
+  set muted(v) {
+    this._muted = !!v;
+    if (this.master) this.master.gain.value = v ? 0 : 1; // also silences sounds already playing
   }
   unlock() {
     if (!this.ctx) {
       const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
-      if (AC) this.ctx = new AC();
+      if (AC) {
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = this._muted ? 0 : 1;
+        this.master.connect(this.ctx.destination);
+      }
     }
     this.ctx?.resume?.();
   }
@@ -23,22 +35,26 @@ export class Audio {
     if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq * slide), t + dur);
     g.gain.setValueAtTime(vol, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g).connect(c.destination);
+    o.connect(g).connect(this.master);
     o.start(t);
     o.stop(t + dur + 0.02);
   }
   noise(dur, vol = 0.1, when = 0) {
     const c = this.ctx;
     if (!c || this.muted) return;
-    const len = Math.floor(c.sampleRate * dur);
-    const buf = c.createBuffer(1, len, c.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    let buf = this.noiseBuffers.get(dur);
+    if (!buf) {
+      const len = Math.floor(c.sampleRate * dur);
+      buf = c.createBuffer(1, len, c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      this.noiseBuffers.set(dur, buf);
+    }
     const s = c.createBufferSource();
     const g = c.createGain();
     g.gain.value = vol;
     s.buffer = buf;
-    s.connect(g).connect(c.destination);
+    s.connect(g).connect(this.master);
     s.start(c.currentTime + when);
   }
   play(name, n = 0) {
@@ -64,6 +80,9 @@ export class Audio {
       case 'hurt': this.tone(400, 0.3, 'sawtooth', 0.06, 0, 0.3); break;
       case 'death': this.tone(500, 0.6, 'sawtooth', 0.07, 0, 0.2); break;
       case 'starpost': this.tone(880, 0.1, 'square', 0.05); this.tone(1175, 0.2, 'square', 0.05, 0.1); break;
+      case 'spikemove': this.noise(0.12, 0.05); this.tone(180, 0.12, 'square', 0.03, 0, 0.6); break;
+      case 'tick': this.tone(1200, 0.03, 'square', 0.03); break;
+      case 'register': this.tone(1568, 0.25, 'square', 0.05); this.tone(2093, 0.3, 'square', 0.04, 0.05); break;
       case 'shield': this.tone(600, 0.3, 'triangle', 0.07, 0, 2); break;
       case '1up': [523, 659, 784, 1046].forEach((f, i) => this.tone(f, 0.15, 'square', 0.05, i * 0.12)); break;
       case 'clear': [523, 659, 784, 1046, 784, 1046].forEach((f, i) => this.tone(f, 0.2, 'square', 0.05, i * 0.15)); break;

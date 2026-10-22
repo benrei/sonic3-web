@@ -5,18 +5,26 @@ import { SCREEN_W, SCREEN_H } from './vdp.js';
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
+const wrap = document.getElementById('screen-wrap');
 const loader = document.getElementById('loader');
 const menu = document.getElementById('menu');
 const zoneList = document.getElementById('zone-list');
+const menuHint = document.getElementById('menu-hint');
+const menuNote = document.getElementById('menu-note');
 const errorEl = document.getElementById('error');
+const romInput = document.getElementById('rom-input');
 const audio = new Audio();
 const image = ctx.createImageData(SCREEN_W, SCREEN_H);
+const COLS = 2, ROWS = Math.ceil(ZONES.length / COLS);
 
 let rom = null;
-let game = null;
+let game = null; // kept while the menu is open so Esc can resume it
 let paused = false;
 let menuIndex = 0;
 let carry = { lives: 3, score: 0 };
+let dirty = true;
+let toast = null; // { text, t }
+let lastInputKind = matchMedia('(pointer: coarse)').matches ? 'touch' : 'keyboard';
 
 // ---------------- ROM loading (file picker, drag & drop, IndexedDB cache) --------
 const DB = 'sonic3-web', STORE = 'rom';
@@ -28,65 +36,109 @@ function idb() {
     r.onerror = () => rej(r.error);
   });
 }
-async function saveRom(buf) {
-  try {
-    const db = await idb();
-    db.transaction(STORE, 'readwrite').objectStore(STORE).put(buf, 'rom');
-  } catch { /* private mode etc. */ }
-}
-async function loadSavedRom() {
+async function dbOp(mode, fn) {
   try {
     const db = await idb();
     return await new Promise((res) => {
-      const q = db.transaction(STORE).objectStore(STORE).get('rom');
-      q.onsuccess = () => res(q.result || null);
+      const q = fn(db.transaction(STORE, mode).objectStore(STORE));
+      q.onsuccess = () => res(q.result ?? null);
       q.onerror = () => res(null);
     });
-  } catch { return null; }
+  } catch { return null; } // private mode etc.
 }
+const saveRom = (buf) => dbOp('readwrite', (s) => s.put(buf, 'rom'));
+const loadSavedRom = () => dbOp('readonly', (s) => s.get('rom'));
+const forgetRom = () => dbOp('readwrite', (s) => s.delete('rom'));
 
-async function useRomBuffer(buf, remember) {
+function useRomBuffer(buf, remember) {
   try {
     rom = new Rom(new Uint8Array(buf));
-    if (rom.checksum !== 0x3ae0) console.warn('Uventet sjekksum', rom.checksum.toString(16), '- forventer Sonic 3 (W) $3AE0');
     if (remember) saveRom(buf);
     errorEl.textContent = '';
     loader.hidden = true;
-    openMenu();
+    game = null;
+    openMenu(rom.checksum !== 0x3ae0
+      ? 'Merk: filen er ikke den vanlige Sonic 3-utgaven (sjekksum $3AE0). Noe kan se rart ut.'
+      : '');
   } catch (e) {
-    errorEl.textContent = e.message;
+    errorEl.textContent = 'Fant ikke Sonic 3 i denne filen. Velg en Sonic the Hedgehog 3 (Mega Drive/Genesis) .bin-fil på 2 MB – ikke Sonic & Knuckles eller Sonic 3 & Knuckles.';
   }
 }
 
-document.getElementById('rom-input').addEventListener('change', async (e) => {
+romInput.addEventListener('change', async (e) => {
   const f = e.target.files[0];
+  e.target.value = ''; // allow picking the same file again
   if (f) useRomBuffer(await f.arrayBuffer(), true);
 });
-loader.addEventListener('dragover', (e) => { e.preventDefault(); loader.classList.add('drag'); });
-loader.addEventListener('dragleave', () => loader.classList.remove('drag'));
-loader.addEventListener('drop', async (e) => {
+// Accept drops anywhere on the page (and never let the browser open the file).
+let dragDepth = 0;
+addEventListener('dragenter', (e) => { e.preventDefault(); if (++dragDepth === 1) loader.classList.add('drag'); });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; loader.classList.remove('drag'); } });
+addEventListener('dragover', (e) => e.preventDefault());
+addEventListener('drop', async (e) => {
   e.preventDefault();
+  dragDepth = 0;
   loader.classList.remove('drag');
-  const f = e.dataTransfer.files[0];
+  const f = e.dataTransfer?.files[0];
   if (f) useRomBuffer(await f.arrayBuffer(), true);
 });
 
-// ---------------- Zone menu ----------------
-function openMenu() {
-  game = null;
+// ---------------- Menu ----------------
+function openMenu(note = '') {
+  paused = false;
   menu.hidden = false;
+  menuNote.textContent = note;
   zoneList.innerHTML = '';
   ZONES.forEach((z, i) => {
     const li = document.createElement('li');
     li.textContent = `${z.name.replace(' Zone', '')} ${z.act}`;
+    li.setAttribute('role', 'option');
     li.onclick = () => startZone(i);
+    li.onmouseenter = () => { menuIndex = i; highlightMenu(); };
     zoneList.append(li);
   });
+  document.getElementById('resume').hidden = !game || game.gameOver;
+  updateMenuHint();
   highlightMenu();
+  dirty = true;
+}
+function closeMenuResume() {
+  if (!game || game.gameOver) return;
+  menu.hidden = true;
+  dirty = true;
 }
 function highlightMenu() {
-  [...zoneList.children].forEach((li, i) => li.classList.toggle('sel', i === menuIndex));
+  [...zoneList.children].forEach((li, i) => {
+    li.classList.toggle('sel', i === menuIndex);
+    li.setAttribute('aria-selected', i === menuIndex);
+  });
 }
+function updateMenuHint() {
+  menuHint.textContent = {
+    keyboard: 'Velg med piltastene og trykk Enter – eller klikk. Esc går tilbake til spillet.',
+    touch: 'Trykk på en sone for å starte.',
+    gamepad: 'Velg med styrekorset og trykk A eller Start. Select går tilbake til spillet.',
+  }[lastInputKind];
+}
+function menuNavigate(p) {
+  let col = Math.floor(menuIndex / ROWS), row = menuIndex % ROWS;
+  if (p.down) row = (row + 1) % ROWS;
+  if (p.up) row = (row + ROWS - 1) % ROWS;
+  if (p.right || p.left) col = (col + 1) % COLS;
+  const i = Math.min(ZONES.length - 1, col * ROWS + row);
+  if (i !== menuIndex) { menuIndex = i; highlightMenu(); }
+  if (p.start || p.a || p.b || p.c) startZone(menuIndex);
+  else if (p.back) closeMenuResume();
+}
+document.getElementById('resume').onclick = closeMenuResume;
+document.getElementById('change-rom').onclick = async () => {
+  await forgetRom();
+  rom = null;
+  game = null;
+  menu.hidden = true;
+  loader.hidden = false;
+};
+
 function startZone(i, keepCheckpoint = false) {
   audio.unlock();
   menuIndex = i;
@@ -95,63 +147,111 @@ function startZone(i, keepCheckpoint = false) {
   if (keepCheckpoint && game?.checkpoint) state.checkpoint = game.checkpoint;
   game = new Game(rom, i, audio, state);
   paused = false;
-  // swallow the key that started the zone so it doesn't immediately pause the game
-  for (const k of Object.keys(held)) if (held[k]) prevHeld[k] = true;
+  swallowHeld();
+  dirty = true;
 }
 
 // ---------------- Input ----------------
 const KEYMAP = {
   ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
-  KeyZ: 'a', KeyX: 'b', KeyC: 'c', Space: 'c', KeyA: 'a', KeyS: 'b', KeyD: 'c', Enter: 'start',
+  KeyZ: 'a', KeyX: 'b', KeyC: 'c', Space: 'c', KeyA: 'a', KeyS: 'b', KeyD: 'c', Enter: 'start', Escape: 'back',
 };
+const KEYS = ['up', 'down', 'left', 'right', 'a', 'b', 'c', 'start', 'back'];
 const held = {};
 const touchHeld = {};
+const latch = {}; // presses shorter than a frame still count
 let prevHeld = {};
-addEventListener('keydown', (e) => {
-  if (e.code in KEYMAP) { held[KEYMAP[e.code]] = true; e.preventDefault(); }
-  audio.unlock();
-  if (!menu.hidden) {
-    const cols = Math.ceil(ZONES.length / 2);
-    if (e.code === 'ArrowDown') menuIndex = (menuIndex + 1) % ZONES.length;
-    if (e.code === 'ArrowUp') menuIndex = (menuIndex + ZONES.length - 1) % ZONES.length;
-    if (e.code === 'ArrowRight') menuIndex = Math.min(ZONES.length - 1, menuIndex + cols);
-    if (e.code === 'ArrowLeft') menuIndex = Math.max(0, menuIndex - cols);
-    if (e.code === 'Enter' || e.code === 'Space' || e.code === 'KeyZ') startZone(menuIndex);
-    highlightMenu();
-    return;
-  }
-  if (e.code === 'Escape' && rom) openMenu();
-  if (e.code === 'KeyM') audio.muted = !audio.muted;
-  if (e.code === 'KeyF') document.getElementById('screen-wrap').requestFullscreen?.();
-});
-addEventListener('keyup', (e) => { if (e.code in KEYMAP) held[KEYMAP[e.code]] = false; });
-for (const b of document.querySelectorAll('#touch button')) {
-  const k = b.dataset.key;
-  const on = (e) => { e.preventDefault(); touchHeld[k] = true; audio.unlock(); };
-  const off = (e) => { e.preventDefault(); touchHeld[k] = false; };
-  b.addEventListener('pointerdown', on);
-  b.addEventListener('pointerup', off);
-  b.addEventListener('pointercancel', off);
-  b.addEventListener('pointerleave', off);
-}
 
+addEventListener('keydown', (e) => {
+  lastInputKind = 'keyboard';
+  audio.unlock();
+  const k = KEYMAP[e.code];
+  if (k) {
+    e.preventDefault();
+    if (!e.repeat) latch[k] = true;
+    held[k] = true;
+  }
+  if (e.code === 'KeyM') toggleMute();
+  if (e.code === 'KeyF') toggleFullscreen();
+});
+addEventListener('keyup', (e) => { const k = KEYMAP[e.code]; if (k) held[k] = false; });
+
+// Releasing everything when focus is lost avoids "stuck" keys after alt-tab.
+function releaseAll() {
+  for (const k of KEYS) { held[k] = false; touchHeld[k] = false; }
+  touchPointers.clear();
+}
+function swallowHeld() { for (const k of KEYS) { prevHeld[k] = true; latch[k] = false; } }
+addEventListener('blur', () => { releaseAll(); if (game && menu.hidden) paused = true; dirty = true; });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { releaseAll(); if (game && menu.hidden) paused = true; dirty = true; } });
+
+// Touch: one d-pad element (direction from finger position, so sliding works) + buttons.
+const touchPointers = new Map(); // pointerId -> keys[]
+const dpad = document.getElementById('dpad');
+function dpadKeys(e) {
+  const r = dpad.getBoundingClientRect();
+  const dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+  const dead = r.width * 0.12, keys = [];
+  if (dx < -dead) keys.push('left');
+  if (dx > dead) keys.push('right');
+  if (dy < -dead) keys.push('up');
+  if (dy > dead) keys.push('down');
+  return keys;
+}
+function refreshTouch() {
+  for (const k of KEYS) touchHeld[k] = false;
+  for (const keys of touchPointers.values()) for (const k of keys) {
+    if (!touchHeld[k]) latch[k] = true;
+    touchHeld[k] = true;
+  }
+}
+dpad.addEventListener('pointerdown', (e) => { e.preventDefault(); lastInputKind = 'touch'; audio.unlock(); dpad.setPointerCapture(e.pointerId); touchPointers.set(e.pointerId, dpadKeys(e)); refreshTouch(); });
+dpad.addEventListener('pointermove', (e) => { if (touchPointers.has(e.pointerId)) { touchPointers.set(e.pointerId, dpadKeys(e)); refreshTouch(); } });
+for (const b of document.querySelectorAll('#touch [data-key]')) {
+  const k = b.dataset.key;
+  b.addEventListener('pointerdown', (e) => { e.preventDefault(); lastInputKind = 'touch'; audio.unlock(); touchPointers.set(e.pointerId, [k]); refreshTouch(); });
+}
+for (const ev of ['pointerup', 'pointercancel']) {
+  addEventListener(ev, (e) => { if (touchPointers.delete(e.pointerId)) refreshTouch(); });
+}
+document.getElementById('touch').addEventListener('contextmenu', (e) => e.preventDefault());
+
+let padPrev = '';
 function readInput() {
   const cur = {};
-  for (const k of ['up', 'down', 'left', 'right', 'a', 'b', 'c', 'start']) cur[k] = !!(held[k] || touchHeld[k]);
+  for (const k of KEYS) cur[k] = !!(held[k] || touchHeld[k]);
   for (const pad of navigator.getGamepads?.() || []) {
     if (!pad) continue;
-    const ax = pad.axes[0] || 0, ay = pad.axes[1] || 0, bt = (i) => pad.buttons[i]?.pressed;
-    cur.left ||= ax < -0.4 || bt(14); cur.right ||= ax > 0.4 || bt(15);
-    cur.up ||= ay < -0.4 || bt(12); cur.down ||= ay > 0.4 || bt(13);
-    cur.a ||= bt(2); cur.b ||= bt(0); cur.c ||= bt(1); cur.start ||= bt(9);
+    const ax = pad.axes[0] || 0, ay = pad.axes[1] || 0, bt = (i) => !!pad.buttons[i]?.pressed;
+    const p = {
+      left: ax < -0.4 || bt(14), right: ax > 0.4 || bt(15), up: ay < -0.4 || bt(12), down: ay > 0.4 || bt(13),
+      a: bt(2) || bt(3), b: bt(0), c: bt(1), start: bt(9), back: bt(8),
+    };
+    const sig = JSON.stringify(p);
+    if (sig !== padPrev && Object.values(p).some(Boolean)) lastInputKind = 'gamepad';
+    padPrev = sig;
+    for (const k in p) cur[k] ||= p[k];
   }
   const pressed = {};
-  for (const k in cur) pressed[k] = cur[k] && !prevHeld[k];
+  for (const k of KEYS) { pressed[k] = (cur[k] && !prevHeld[k]) || !!latch[k]; latch[k] = false; }
   prevHeld = cur;
   return { held: cur, pressed };
 }
 
-// ---------------- Main loop (fixed 60 Hz) ----------------
+// ---------------- Sound / fullscreen ----------------
+audio.muted = localStorage.getItem('sonic3-muted') === '1';
+function toggleMute() {
+  audio.muted = !audio.muted;
+  localStorage.setItem('sonic3-muted', audio.muted ? '1' : '0');
+  showToast(audio.muted ? 'LYD AV' : 'LYD PÅ');
+}
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else wrap.requestFullscreen?.().catch(() => {});
+}
+function showToast(text) { toast = { text, t: 90 }; dirty = true; }
+
+// ---------------- Main loop (fixed 59.92 Hz, redraw only when something changed) ----------------
 const STEP = 1000 / 59.92;
 let last = performance.now(), acc = 0;
 function frame(now) {
@@ -161,36 +261,48 @@ function frame(now) {
     acc -= STEP;
     tick();
   }
-  draw();
+  if (dirty) { dirty = false; draw(); }
   requestAnimationFrame(frame);
 }
 
 function tick() {
-  if (!game) return;
   const input = readInput();
+  if (toast && --toast.t <= 0) { toast = null; dirty = true; }
+  if (!rom) return;
+  if (!menu.hidden) { menuNavigate(input.pressed); return; }
+  if (!game) return;
+  if (input.pressed.back) { openMenu(); return; }
   if (input.pressed.start) {
-    if (game.gameOver) { carry = { lives: 3, score: 0 }; openMenu(); return; }
+    if (game.gameOver) { carry = { lives: 3, score: 0 }; game = null; openMenu(); return; }
     paused = !paused;
+    dirty = true;
   }
   if (paused) return;
   game.update(input);
+  dirty = true;
   if (game.restartRequested) {
-    carry = { lives: game.lives, score: game.score };
+    carry = { lives: game.lives, score: game.score, nextExtraLife: game.nextExtraLife };
     startZone(game.zoneIndex, true);
-  } else if (game.actClear > 300) {
-    carry = { lives: game.lives, score: game.score };
-    startZone(Math.min(ZONES.length - 1, game.zoneIndex + 1));
+  } else if (game.resultsDone) {
+    carry = { lives: game.lives, score: game.score, nextExtraLife: game.nextExtraLife };
+    if (game.zoneIndex + 1 < ZONES.length) startZone(game.zoneIndex + 1);
+    else { game = null; carry = { lives: 3, score: 0 }; openMenu('Gratulerer – du har klart alle sonene!'); }
   }
 }
 
 function draw() {
-  if (!game) return;
-  game.render();
-  new Uint32Array(image.data.buffer).set(game.vdp.frame);
-  ctx.putImageData(image, 0, 0);
-  const o = game.overlay;
-  if (o) drawOverlay(o);
-  if (paused) banner('PAUSE', 112);
+  if (game) {
+    game.render();
+    new Uint32Array(image.data.buffer).set(game.vdp.frame);
+    ctx.putImageData(image, 0, 0);
+    const o = game.overlay;
+    if (o) drawOverlay(o);
+    if (paused && menu.hidden) banner('PAUSE', 112);
+  } else {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+  }
+  if (toast) banner(toast.text, 24, '#ffd200', 12);
 }
 
 function banner(text, y, color = '#fff', size = 20) {
@@ -218,15 +330,35 @@ function drawOverlay(o) {
     banner(`ACT ${game.zone.act}`, 140, '#ffd200', 16);
     ctx.restore();
   } else if (o.kind === 'clear') {
-    banner('SONIC GOT THROUGH', 80, '#fff', 20);
-    banner(`ACT ${game.zone.act}`, 104, '#ffd200', 18);
-  } else if (o.kind === 'gameover') {
-    banner('GAME OVER', 112, '#fff', 28);
-    banner('trykk Enter', 140, '#ffd200', 12);
+    banner('SONIC GOT THROUGH', 64, '#fff', 20);
+    banner(`ACT ${game.zone.act}`, 86, '#ffd200', 18);
+    const r = o.results;
+    if (r) {
+      // Obj_LevelResults: TIME BONUS / RING BONUS / TOTAL (values in points)
+      const row = (label, v, y) => { tally(label, 88, y, '#ffd200'); tally(String(v * 10), 232, y, '#fff', 'right'); };
+      row('TIME BONUS', r.time, 128);
+      row('RING BONUS', r.ring, 146);
+      row('TOTAL', r.total, 170);
+    }
+  } else if (o.kind === 'timeover') {
+    banner('TIME OVER', 112, '#fff', 28);
+  } else if (o.kind === 'gameover' || o.kind === 'timeover-gameover') {
+    banner(o.kind === 'gameover' ? 'GAME OVER' : 'TIME OVER', 112, '#fff', 28);
+    banner(lastInputKind === 'touch' ? 'trykk START' : 'trykk Enter / Start', 140, '#ffd200', 12);
   }
 }
 
-// Boot: try a saved ROM, or ?rom=<url> (handy for local testing).
+function tally(text, x, y, color, align = 'left') {
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textAlign = align;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#000';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
+// Boot: try ?rom=<url> (handy for local testing), else a ROM saved in this browser.
 (async () => {
   const url = new URLSearchParams(location.search).get('rom');
   if (url) {
@@ -240,5 +372,5 @@ function drawOverlay(o) {
 })();
 requestAnimationFrame(frame);
 
-// expose for debugging
+// exposed for debugging / automated tests
 window.__s3 = { get game() { return game; }, startZone };
