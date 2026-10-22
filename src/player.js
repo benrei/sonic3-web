@@ -1084,6 +1084,8 @@ export class Player {
       this.anim = 9;
       this.spin_dash_flag = 1;
       this.spin_dash_counter = 0;
+      this.spin_revs = 0;
+      this.onSound?.('spindash', 0); // sfx_Spindash
       // loc_12B6E
       this._levelBound();
       if (this.routine === 2) this._anglePos();
@@ -1108,6 +1110,7 @@ export class Player {
       if (this.pressed.jump) {
         this.anim = 9;
         this.prev_anim = 0; // restart the spindash anim
+        this.onSound?.('spindash', ++this.spin_revs); // sfx_Spindash on every rev (loc_12C60)
         this.spin_dash_counter += 0x200;
         if (this.spin_dash_counter >= 0x800) this.spin_dash_counter = 0x800;
       }

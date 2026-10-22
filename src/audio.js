@@ -41,11 +41,16 @@ export class Audio {
     s.connect(g).connect(c.destination);
     s.start(c.currentTime + when);
   }
-  play(name) {
+  play(name, n = 0) {
     switch (name) {
       case 'ring': this.tone(1318, 0.08, 'square', 0.06); this.tone(1760, 0.25, 'square', 0.06, 0.06); break;
       case 'jump': this.tone(300, 0.18, 'square', 0.05, 0, 3); break;
-      case 'spindash': this.tone(200, 0.2, 'sawtooth', 0.05, 0, 4); break;
+      case 'spindash': {
+        // the S3 driver raises the rev pitch with each consecutive press
+        const f = 200 * Math.pow(1.12, Math.min(n, 8));
+        this.tone(f, 0.22, 'sawtooth', 0.05, 0, 4);
+        break;
+      }
       case 'release': this.noise(0.25, 0.08); this.tone(800, 0.2, 'sawtooth', 0.04, 0, 0.3); break;
       case 'roll': this.tone(500, 0.12, 'triangle', 0.06, 0, 0.5); break;
       case 'skid': this.noise(0.15, 0.05); break;

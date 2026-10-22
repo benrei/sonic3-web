@@ -25,6 +25,7 @@ export class Game {
     this.animator = new TileAnimator(rom, this.level, this.vdp, ((z >> 8) << 1) | (z & 1));
     this.player = new Player(rom, this.level);
     this.player.onRingLoss = () => this.loseRings();
+    this.player.onSound = (name, n) => this.audio?.play(name, n);
     this.sonicMap = this.maps(ADDR.Map_Sonic);
     this.ringMap = this.maps(ADDR.Map_Ring);
     this.hudMap = this.maps(MAP_HUD);
@@ -170,7 +171,6 @@ export class Game {
     const prev = this.prevP || {};
     const air = !!(p.status & STATUS_IN_AIR);
     if (air && !prev.air && p.y_vel < -0x300 && p.anim === 2) this.sfx('jump');
-    if (p.spin_dash_flag && !prev.spin) this.sfx('spindash');
     if (!p.spin_dash_flag && prev.spin) this.sfx('release');
     if (p.anim === 0x0d && prev.anim !== 0x0d) this.sfx('skid');
     if (p.hurting && !prev.hurting) this.sfx('hurt');
