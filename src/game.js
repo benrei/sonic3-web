@@ -53,8 +53,14 @@ export class Game {
     this.deathTimer = 0;
     this.spawnPlayer();
     // the level's end trigger: the AIZ1 miniboss cutscene object, otherwise near the right edge
-    const boss = this.level.objects.find((o) => o.id === 128 || o.id === 169);
-    this.endX = boss ? boss.x : this.level.bounds.maxX + 320 - 0x80;
+    // End of act. The original ends act 1 with a miniboss + Obj_EndSignControl and act 2
+    // with the end boss + Obj_EggCapsule; those aren't ported, so the act ends when Sonic
+    // reaches the boss / capsule (or is held at the camera's right limit, see update()).
+    // act 1: minibosses (AIZ cutscene, HCZ, MGZ, CNZ, LBZ box); act 2: end bosses + Obj_EggCapsule
+    const END_OBJECTS = this.zone.act === 1 ? [128, 173, 196, 142, 204] : [169, 181, 198, 141, 178, 140];
+    const ends = this.level.objects.filter((o) => END_OBJECTS.includes(o.id)).map((o) => o.x);
+    this.endX = this.zone.id === 0x500 ? 0x6900 // ICZ1 switches to ICZ2 at camera X $6900
+      : ends.length ? Math.min(...ends) - 0x80 : Infinity;
     this.camX = 0;
     this.camY = 0;
     this.centerCamera();
@@ -143,7 +149,9 @@ export class Game {
     if (!freeze) this.core.afterCamera();
 
     // reached the end of the act?
-    if (!this.actClear && p.x_pos >= this.endX && !p.dead) this.startResults();
+    const camMaxX = this.ram ? this.ram.uw(R.Camera_max_X_pos) : undefined;
+    const atRightLimit = camMaxX !== undefined && p.x_pos >= camMaxX + 0x120 && this.camX >= camMaxX;
+    if (!this.actClear && !p.dead && p.routine === 2 && (p.x_pos >= this.endX || atRightLimit)) this.startResults();
   }
 
   // Obj_LevelResultsInit: time bonus from TimeBonus[min(secs/30, 7)] (x10 points),
