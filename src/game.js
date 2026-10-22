@@ -10,6 +10,8 @@ import { Ram, R } from './ram.js';
 import { Camera } from './camera.js';
 import { Scroll } from './scroll.js';
 import { ShieldObject } from './shields.js';
+import { spawnLevelIntro } from './intros.js';
+import { Water } from './water.js';
 
 const MAP_HUD = 0xe932;
 const HUD_DIGITS = 0xeed2; // ArtUnc_HUDDigits: 8x16 glyphs, $40 bytes each
@@ -27,7 +29,7 @@ export class Game {
     this.level = new Level(rom, this.zone);
     this.vdp = new VDP(this.level);
     const z = this.zone.id;
-    this.animator = new TileAnimator(rom, this.level, this.vdp, ((z >> 8) << 1) | (z & 1));
+    this.animator = new TileAnimator(rom, this.level, this.vdp, ((z >> 8) << 1) | (z & 1), this);
     this.player = new Player(rom, this.level);
     this.player.onRingLoss = () => this.loseRings();
     this.player.onSound = (name, n) => this.audio?.play(name, n);
@@ -66,6 +68,11 @@ export class Game {
     this.centerCamera();
     // object manager / ring manager / touch response (objcore.js); Load_Sprites runs here
     new ObjCore(this, createObject);
+    this.water = new Water(this); // water palette, Dust / Breathing_bubbles / Wave_Splash (water.js)
+    // SpawnLevelMainSprites: level intro objects (ICZ1 snowboard, LBZ1 launch; intros.js)
+    this.ctrl1Locked = false; // Ctrl_1_locked
+    this.ctrl1Logical = null; // Ctrl_1_logical while locked
+    spawnLevelIntro(this);
   }
 
   maps(addr) {
@@ -95,6 +102,7 @@ export class Game {
     this.camera.levelSizeStart();
     this.camera.deformBgLayer();
     this.scroll.levelSetup();
+    this.animator.levelInit(); // Animate_Init (+ the Animate_Tiles call at the end of level init)
     this.syncCamera();
   }
 
@@ -133,7 +141,8 @@ export class Game {
     const freeze = this.titleCard > 110;
     if (!freeze) {
       const control = p.routine === 2;
-      p.update(input);
+      this.ctrl1 = input; // Ctrl_1; Obj_Sonic only copies it to Ctrl_1_logical while unlocked
+      p.update(this.ctrl1Locked ? this.ctrl1Logical ?? { held: {}, pressed: {} } : input);
       // Sonic_Control ends with TouchResponse (rings, shield deflection, object touches)
       if (control && !(p.object_control & 0xa0)) this.core.touchResponse();
       (this.shieldObj ??= new ShieldObject(this)).update(); // Obj_*Shield runs right after the player
@@ -145,6 +154,7 @@ export class Game {
     if (!freeze) this.core.runObjects();
 
     this.updateCamera();
+    this.animator.animateTiles(); // Animate_Tiles (after ScreenEvents in LevelLoop)
     // Load_Rings, OscillateNumDo, ChangeRingFrame, Render_Sprites flags, Load_Sprites
     if (!freeze) this.core.afterCamera();
 
@@ -287,6 +297,7 @@ export class Game {
     this.drawPlayer(cx, cy);
     this.core.draw(vdp, cx, cy); // Render_Rings + displayed objects
     this.drawHUD();
+    this.water.prepareRender(vdp); // Water_full_screen_flag / H_int_counter -> line palettes
     vdp.renderScroll(this.scroll.scrollLines());
     this.drawOverlays();
   }

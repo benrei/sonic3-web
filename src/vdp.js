@@ -14,6 +14,12 @@ export class VDP {
     this.decodeAll();
     this.frame = new Uint32Array(SCREEN_W * SCREEN_H);
     this.palRGBA = new Uint32Array(64);
+    // Water: Water_palette in RGBA, and the palette in effect on each scanline (the CRAM
+    // contents after VInt's palette DMA and the water H-int; see setupLinePalettes).
+    this.waterPalRGBA = new Uint32Array(64);
+    this.linePal = new Array(SCREEN_H).fill(this.palRGBA);
+    this.water = null; // { fullScreen, counter (H_int_counter), groups (HInt3 table) | null (HInt2) }
+    this.stagePals = [];
     this.updatePalette();
     this.sprites = [];
     this.backdrop = 0x20; // palette line 2 colour 0 (VDP register 7 in levels)
@@ -43,6 +49,59 @@ export class VDP {
       const [r, g, b] = mdColor(pal[i]);
       this.palRGBA[i] = ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0;
     }
+    const wp = this.level.waterPalette;
+    if (wp) {
+      for (let i = 0; i < 64; i++) {
+        const [r, g, b] = mdColor(wp[i]);
+        this.waterPalRGBA[i] = ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0;
+      }
+    }
+  }
+
+  // Per-scanline palettes for the water split. VInt_0_Level DMAs Normal_palette (or
+  // Water_palette when Water_full_screen_flag is set) into CRAM; the H-int fires after
+  // line H_int_counter. HInt2 (Hydrocity) then copies the whole Water_palette; HInt3 (the
+  // other water levels) copies 3 colours per table entry (Water_palette_data_addr), one
+  // entry per scanline or so (each loop iteration waits ~490 cycles, about one line), so
+  // the colours change over a few lines. Below line 200 only part of the table is used.
+  setupLinePalettes() {
+    const lp = this.linePal, w = this.water;
+    if (!w) { if (lp[0] !== this.palRGBA || lp[SCREEN_H - 1] !== this.palRGBA) lp.fill(this.palRGBA); return; }
+    if (w.fullScreen) { lp.fill(this.waterPalRGBA); return; }
+    lp.fill(this.palRGBA);
+    const c = w.counter & 0xff;
+    if (c === 0xff) return; // no H-int this frame
+    const start = c + 1;
+    if (!w.groups) { // HInt2
+      for (let y = start; y < SCREEN_H; y++) lp[y] = this.waterPalRGBA;
+      return;
+    }
+    // HInt3
+    const g = w.groups;
+    let d1 = g.length - 1;
+    if (c >= 200) {
+      d1 -= c - 200;
+      if (d1 < 0) return; // .skipTransfer
+    }
+    let cur = this.palRGBA;
+    for (let i = 0; i <= d1; i++) {
+      const st = (this.stagePals[i] ??= new Uint32Array(64));
+      st.set(cur);
+      const o = g[i];
+      st[o] = this.waterPalRGBA[o]; st[o + 1] = this.waterPalRGBA[o + 1]; st[o + 2] = this.waterPalRGBA[o + 2];
+      cur = st;
+      const y0 = start + i;
+      if (y0 >= SCREEN_H) break;
+      const y1 = i === d1 ? SCREEN_H : Math.min(SCREEN_H, y0 + 1);
+      for (let y = y0; y < y1; y++) lp[y] = st;
+    }
+  }
+
+  // backdrop colour per line
+  fillBackdrop() {
+    const f = this.frame, lp = this.linePal, b = this.backdrop;
+    if (lp[0] === lp[SCREEN_H - 1]) { f.fill(lp[0][b]); return; }
+    for (let y = 0; y < SCREEN_H; y++) f.fill(lp[y][b], y * SCREEN_W, (y + 1) * SCREEN_W);
   }
 
   // Draw one plane. hscroll(line) -> plane x of the screen's left edge,
@@ -50,11 +109,12 @@ export class VDP {
   // vcols: optional per-16px-screen-column V-scroll (plane y of line 0 per column).
   // Negative plane y wraps around the layout height (vertically looping levels).
   drawPlane(bg, prio, hscroll, vscroll, vcols = null) {
-    const L = this.level, frame = this.frame, pix = this.pixels, pal = this.palRGBA;
+    const L = this.level, frame = this.frame, pix = this.pixels, linePal = this.linePal;
     const blocks = L.blocks;
     const wrapW = bg ? L.bgWidth * 128 : 0;
     const wrapH = ((bg ? L.bgRowMask : L.rowMask) >> 2) * 128 + 127;
     for (let sy = 0; sy < SCREEN_H; sy++) {
+      const pal = linePal[sy];
       let py = vscroll(sy);
       if (py < 0) py &= wrapH;
       let px = hscroll(sy) | 0;
@@ -97,8 +157,9 @@ export class VDP {
   // (hs[line] = plane x of the screen's left edge) and V-scroll vs (plane y of line 0),
   // wrapping at 512x256 pixels like the VDP. vcols: optional per-16px-column V-scroll.
   drawNameTable(nt, prio, hs, vs, vcols = null) {
-    const frame = this.frame, pix = this.pixels, pal = this.palRGBA;
+    const frame = this.frame, pix = this.pixels, linePal = this.linePal;
     for (let sy = 0; sy < SCREEN_H; sy++) {
+      const pal = linePal[sy];
       const px = hs[sy] | 0;
       const rowBase = sy * SCREEN_W;
       let sx = 0;
@@ -147,7 +208,7 @@ export class VDP {
   }
 
   drawPiece(p, word, s) {
-    const frame = this.frame, pix = this.pixels, pal = this.palRGBA;
+    const frame = this.frame, pix = this.pixels, linePal = this.linePal;
     const hf = ((word >> 11) & 1) ^ (s.flipX ? 1 : 0);
     const vf = ((word >> 12) & 1) ^ (s.flipY ? 1 : 0);
     const w = p.w * 8, h = p.h * 8;
@@ -160,6 +221,7 @@ export class VDP {
     for (let yy = 0; yy < h; yy++) {
       const sy = y0 + yy;
       if (sy < 0 || sy >= SCREEN_H) continue;
+      const pal = linePal[sy];
       const ly = vf ? h - 1 - yy : yy;
       for (let xx = 0; xx < w; xx++) {
         const sx = x0 + xx;
@@ -174,7 +236,8 @@ export class VDP {
 
   // Render with the scroll state from scroll.js: { fg, fgV, bg, bgV, bgNT, fgVcols, bgVcols }.
   renderScroll(sc) {
-    this.frame.fill(this.palRGBA[this.backdrop]);
+    this.setupLinePalettes();
+    this.fillBackdrop();
     const fgH = (y) => sc.fg[y], fgV = (y) => sc.fgV + y;
     this.sprites.sort((a, b) => a.order - b.order);
     this.drawNameTable(sc.bgNT, 0, sc.bg, sc.bgV, sc.bgVcols);
@@ -187,7 +250,8 @@ export class VDP {
   }
 
   render(fgX, fgY, bgH, bgV) {
-    this.frame.fill(this.palRGBA[this.backdrop]);
+    this.setupLinePalettes();
+    this.fillBackdrop();
     const fgH = () => fgX, fgV = (y) => fgY + y;
     this.sprites.sort((a, b) => a.order - b.order);
     this.drawPlane(true, 0, bgH, bgV);

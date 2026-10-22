@@ -86,6 +86,13 @@ export class Audio {
       case 'shield': this.tone(600, 0.3, 'triangle', 0.07, 0, 2); break;
       case '1up': [523, 659, 784, 1046].forEach((f, i) => this.tone(f, 0.15, 'square', 0.05, i * 0.12)); break;
       case 'clear': [523, 659, 784, 1046, 784, 1046].forEach((f, i) => this.tone(f, 0.2, 'square', 0.05, i * 0.15)); break;
+      // water (water.js / player.js)
+      case 'splash': this.noise(0.3, 0.1); this.tone(700, 0.2, 'sine', 0.04, 0, 0.4); break; // sfx_Splash
+      case 'airding': this.tone(1568, 0.12, 'square', 0.05); this.tone(1568, 0.12, 'square', 0.05, 0.2); break; // sfx_AirDing
+      case 'airbubble': this.tone(400, 0.12, 'sine', 0.08, 0, 3); break; // sfx_Bubble
+      case 'drown': this.tone(600, 0.8, 'sawtooth', 0.06, 0, 0.15); break; // sfx_Drown
+      case 'drowning': [262, 277, 294, 311, 330, 349].forEach((f, i) => this.tone(f, 0.18, 'square', 0.04, i * 0.2)); break; // mus_Drowning cue
+      case 'music-level': break; // Player_ResetAirTimer: resume level music (no music here)
       default: break;
     }
   }

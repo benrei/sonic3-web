@@ -4,7 +4,9 @@
 // positions are 16.16 longs (pixel word + subpixel word), velocities are signed
 // 8.8 words, angles are bytes (256 = 360 degrees) and wrap around.
 //
-// Not ported: water, Super Sonic, 2P/competition, Tails, debug mode, background
+// Water: Sonic_Water / Sonic_InWater / Sonic_OutWater and the underwater variants of the
+// physics are here; the objects (air countdown, splash, bubbles) live in water.js.
+// Not ported: Super Sonic, 2P/competition, Tails, debug mode, background
 // collision (Background_collision_flag), sound, dust/shield objects, position
 // recording. Objects are handled by the game: it can set Status_OnObj (+ an
 // optional `interact` object for edge balancing).
@@ -22,7 +24,7 @@ export const STATUS = { Facing: 1, InAir: 2, Roll: 4, OnObj: 8, RollJump: 0x10, 
 // status_secondary bits
 export const STATUS2 = { Shield: 1, Invincible: 2, SpeedShoes: 4, FireShield: 0x10, LtngShield: 0x20, BublShield: 0x40 };
 
-const S_FACING = 1, S_INAIR = 2, S_ROLL = 4, S_ONOBJ = 8, S_ROLLJUMP = 0x10, S_PUSH = 0x20;
+const S_FACING = 1, S_INAIR = 2, S_ROLL = 4, S_ONOBJ = 8, S_ROLLJUMP = 0x10, S_PUSH = 0x20, S_UNDERWATER = 0x40;
 
 const s8 = (v) => (v << 24) >> 24;
 const s16 = (v) => (v << 16) >> 16;
@@ -34,6 +36,8 @@ const SPINDASH_SPEEDS = [0x800, 0x880, 0x900, 0x980, 0xa00, 0xa80, 0xb00, 0xb80,
 // Character_Speeds (Sonic): top speed, acceleration, deceleration
 const NORMAL_SPEEDS = [0x600, 0xc, 0x80];
 const SHOES_SPEEDS = [0xc00, 0x18, 0x80];
+// Sonic_InWater: underwater top speed, acceleration, deceleration
+const WATER_SPEEDS = [0x300, 6, 0x40];
 
 export class Player {
   constructor(rom, level) {
@@ -53,6 +57,9 @@ export class Player {
     this.cameraY = null; // game may set the real Camera_Y_pos (used for the death fall)
 
     this.onRingLoss = null;
+    // water.js sets this: { flag (Water_flag), level (Water_level), onWaterChange(p, entered),
+    // splash(p) (Dust anim 1) }. null = no water (e.g. the headless physics test).
+    this.water = null;
     this.interact = null; // object Sonic stands on (for balancing): {x_pos, width_pixels, status}
     this._reset(level.start.x, level.start.y);
   }
@@ -106,6 +113,7 @@ export class Player {
     this.primaryAngle = 0;
     this.secondaryAngle = 0;
     this.frameCounter = 0;
+    this.air_left = 30; // Sonic_Init_Continued: move.b #30,air_left(a0)
     this.dead = false;
     this.visible = true;
     this._deathCamY = 0;
@@ -556,6 +564,7 @@ export class Player {
       case 2: this._control(); break;
       case 4: this._hurtRoutine(); break;
       case 6: this._deathRoutine(); break;
+      case 12: this._drownRoutine(); break;
       default: break; // 8: dead, waiting for the game to restart
     }
   }
@@ -578,6 +587,7 @@ export class Player {
     } else {
       this._display();
     }
+    this._water(); // Sonic_Water (after Sonic_Display / Sonic_Super / Sonic_RecordPos)
     this.next_tilt = this.primaryAngle;
     this.tilt = this.secondaryAngle;
     this._instaShieldTick();
@@ -634,6 +644,8 @@ export class Player {
     this._levelBound();
     if (this.routine !== 2) return;
     this._moveSprite();
+    // reduce gravity by $28 ($38-$28=$10) underwater
+    if (this.status & S_UNDERWATER) this.y_vel = s16(this.y_vel - 0x28);
     this._jumpAngle();
     this._doLevelCollision();
   }
@@ -1003,7 +1015,7 @@ export class Player {
     if (!this.pressed.jump) return false;
     const room = this._calcRoomOverHead((this.angle + 0x80) & 0xff);
     if (room < 6) return false; // not enough room to jump
-    const d2 = 0x680;
+    const d2 = this.status & S_UNDERWATER ? 0x380 : 0x680; // lower jump speed underwater
     const sin = this._sincos((this.angle - 0x40) & 0xff);
     this.x_vel = s16(this.x_vel + (Math.imul(this._cos, d2) >> 8));
     this.y_vel = s16(this.y_vel + (Math.imul(sin, d2) >> 8));
@@ -1029,7 +1041,7 @@ export class Player {
   // Sonic_JumpHeight
   _jumpHeight() {
     if (this.jumping) {
-      const d1 = -0x400;
+      const d1 = this.status & S_UNDERWATER ? -0x200 : -0x400;
       if (d1 > this.y_vel) {
         if (!this.held.jump) this.y_vel = d1; // let go of jump: cap jump height
         return;
@@ -1388,7 +1400,7 @@ export class Player {
 
   // BubbleShield_Bounce
   _bubbleShieldBounce() {
-    const d2 = 0x780;
+    const d2 = this.status & S_UNDERWATER ? 0x400 : 0x780;
     const sin = this._sincos((this.angle - 0x40) & 0xff);
     this.x_vel = s16(this.x_vel + (Math.imul(this._cos, d2) >> 8));
     this.y_vel = s16(this.y_vel + (Math.imul(sin, d2) >> 8));
@@ -1426,8 +1438,12 @@ export class Player {
     this.status |= S_INAIR;
     this.y_vel = -0x400;
     this.x_vel = -0x200;
+    if (this.status & S_UNDERWATER) {
+      this.y_vel = -0x200;
+      this.x_vel = -0x100;
+    }
     if (sourceX === undefined || sourceX === null) sourceX = this.status & S_FACING ? this.x_pos - 1 : this.x_pos + 1;
-    if (u16(this.x_pos) >= u16(sourceX)) this.x_vel = 0x200;
+    if (u16(this.x_pos) >= u16(sourceX)) this.x_vel = s16(-this.x_vel);
     this.ground_vel = 0;
     this.anim = 0x1a;
     this.invulnerable_time = 120;
@@ -1460,6 +1476,7 @@ export class Player {
   _hurtRoutine() {
     this._moveSprite2();
     this.y_vel = s16(this.y_vel + 0x30);
+    if (this.status & S_UNDERWATER) this.y_vel = s16(this.y_vel - 0x20);
     // sub_1319C
     if (s16(this.bounds.maxY + 0xe0) < this.y_pos) {
       this.kill();
@@ -1492,6 +1509,71 @@ export class Player {
     }
     this._moveSprite();
     this._animate();
+  }
+
+  // loc_13404 (routine $C): drowning. Obj_AirCountdown keeps anim $17 and switches to
+  // routine 6 after $78 frames.
+  _drownRoutine() {
+    this._moveSprite2();
+    this.y_vel = s16(this.y_vel + 0x10);
+    this._animate();
+  }
+
+  // ================================================================ water
+  // Sonic_Water / Sonic_InWater / Sonic_OutWater
+  _water() {
+    const w = this.water;
+    if (!w || !w.flag) return;
+    if (s16(w.level) >= this.y_pos) return this._outWater(w);
+    // Sonic_InWater
+    if (this.status & S_UNDERWATER) return;
+    this.status |= S_UNDERWATER;
+    this.resetAirTimer();
+    w.onWaterChange(this, true); // Water_entered_counter, Obj_AirCountdown in Breathing_bubbles
+    [this.max_speed, this.acceleration, this.deceleration] = WATER_SPEEDS;
+    if (this.object_control) return;
+    this.x_vel = this.x_vel >> 1;
+    this.y_vel = this.y_vel >> 2; // asr y_vel twice
+    if (this.y_vel === 0) return;
+    w.splash(this); // move.w #1<<8,anim(a6): splash animation of the Dust object
+    this.onSound?.('splash'); // sfx_Splash
+  }
+
+  _outWater(w) {
+    if (!(this.status & S_UNDERWATER)) return;
+    this.status &= ~S_UNDERWATER;
+    this.resetAirTimer();
+    w.onWaterChange(this, false);
+    [this.max_speed, this.acceleration, this.deceleration] = NORMAL_SPEEDS;
+    // loc_11FE6: double the exit speed unless hurt, controlled or already fast
+    if (this.routine !== 4 && !this.object_control && this.y_vel >= -0x400) this.y_vel = s16(this.y_vel << 1);
+    if (this.anim === 0x1c) return; // blank animation
+    if (this.y_vel === 0) return;
+    w.splash(this);
+    if (this.y_vel <= -0x1000) this.y_vel = -0x1000; // limit upward y velocity exiting the water
+    this.onSound?.('splash');
+  }
+
+  // Player_ResetAirTimer
+  resetAirTimer() {
+    if (this.air_left <= 12) this.onSound?.('music-level'); // countdown had started: resume the level music
+    this.air_left = 30;
+  }
+
+  // AirCountdown_ReduceAir, out of air (called by Obj_AirCountdown in water.js)
+  drown() {
+    this.object_control = 0x81;
+    this.onSound?.('drown'); // sfx_Drown
+    this.resetAirTimer();
+    this._touchFloor(); // Player_TouchFloor
+    this.anim = 0x17;
+    this.status |= S_INAIR;
+    this.highPriority = true; // bset #7,art_tile(a0)
+    this.y_vel = 0;
+    this.x_vel = 0;
+    this.ground_vel = 0;
+    this.routine = 12;
+    this._deathCamY = this.cameraY ?? this.y_pos - this.distance_from_top;
   }
 
   // Bounce off something destroyed from above (badnik / monitor)

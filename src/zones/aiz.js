@@ -5,7 +5,7 @@
 // AIZ2_BackgroundEvent (Normal / ShipRefresh / ShipMove BG routines), AIZ2_Deform,
 // AIZ2_ApplyDeform.
 // Not ported: the AIZ1 intro deformation (this game starts after the intro), the AIZ1 tree
-// reveal (needs Obj_AIZ1TreeRevealControl), the AIZ1->AIZ2 fire transition and the AIZ2
+// reveal tile drawing (the chunk swaps are ported), the AIZ1->AIZ2 fire transition and the AIZ2
 // bombership sequence (screen-event routines 4..16, Obj_AIZBattleship, AIZ2_DoShipLoop).
 import { R, s16, u16 } from '../ram.js';
 
@@ -24,8 +24,12 @@ const HS = R.HScroll_table;
 // ------------------------------------------------------------------------------- AIZ1
 export const AIZ1 = {
   screenInit(s) { s.resetTileOffsetPositionActual(); },
-  // AIZ1_ScreenEvent: DrawTilesAsYouMove (+ tree reveal when Events_fg_4 is set by its object)
-  screenEvent(s) { s.drawTilesAsYouMove(); },
+  // AIZ1_ScreenEvent: DrawTilesAsYouMove + the hollow tree's chunk swaps (Events_fg_4 is
+  // counted up by Obj_AIZ1TreeRevealControl, objects-aiz.js)
+  screenEvent(s) {
+    s.drawTilesAsYouMove();
+    aiz1TreeChunks(s);
+  },
   // AIZ1_BackgroundInit, "not in the intro" branch (loc_3ACE6)
   bgInit(s) {
     const m = s.m;
@@ -55,6 +59,31 @@ export const AIZ1 = {
     aiz1ApplyDeformWater(s);
   },
 };
+
+// AIZ1_ScreenEvent, tree part: AIZ1SE_ChangeChunk1-4 copy the "revealed" tree chunks stored at
+// columns 0-1 of layout rows 0-3 over columns $59-$5A of rows 5-8 as the player climbs.
+// Not ported: the gradual AIZ_TreeReveal tile-row drawing into plane A (the renderer draws
+// plane A straight from the layout, so each swap shows up at once).
+function aiz1TreeChunks(s) {
+  const m = s.m;
+  const d0 = m.uw(R.Events_fg_4);
+  if (!d0) return;
+  const row = (r) => { const p = m.uw(0xff8008 + r * 4); return p & 0x8000 ? 0xff0000 | p : p; };
+  const change = (dst, src) => {
+    const a1 = row(dst), a5 = row(src);
+    m.setB(a1 + 0x59, m.ub(a5));
+    m.setB(a1 + 0x5a, m.ub(a5 + 1));
+  };
+  let first;
+  if (m.uw(R.Camera_X_pos_copy) >= 0x2d30 || d0 >= 0x39) { // AIZ1SE_ChangeChunk1
+    m.setW(R.Events_fg_4, 0);
+    first = 5;
+  } else if (d0 >= 0x34) first = 6;
+  else if (d0 >= 0x24) first = 7;
+  else if (d0 >= 0x14) first = 8;
+  else return;
+  for (let r = first; r <= 8; r++) change(r, r - 5);
+}
 
 // AIZ1_Deform: Camera_Y_pos_BG = Camera_Y / 2; band X positions in HScroll_table.
 // Returns d2 (used by the init code for HScroll_table+6).

@@ -2,6 +2,8 @@
 // Labels in comments are the original ones; loc_xxxxx labels are ROM addresses.
 // Art, mappings, animation scripts and data tables are read from the ROM.
 import { Obj, Explosion, Projectile, P1_STANDING, P1_PUSHING, TOUCH_SIDE, TOUCH_BOTTOM } from './objcore.js';
+import { AIZ_TYPES } from './objects-aiz.js';
+import { Bubbler } from './water.js';
 
 const S_FACING = 1, S_INAIR = 2, S_ROLL = 4, S_ONOBJ = 8, S_PUSH = 0x20;
 const SS_INVINCIBLE = 2, SS_FIRE = 0x10;
@@ -25,9 +27,6 @@ export const MAP = {
   CollapsingPlatform: 0x1e6c8,
   CollapsingPlatform2: 0x1e7ac,
   ICZCollapsingBridge: 0x1f2f2,
-  Rhinobot: 0x1615a8,
-  Bloominator: 0x1616c0,
-  MonkeyDude: 0x161776,
   Plant: 0x2b8ec,
 };
 
@@ -1030,127 +1029,15 @@ class Plant extends Obj {
   }
 }
 
-// =============================================================================
-// Badniks (behaviour still approximate; to be rewritten). They interact with the
-// player only through Touch_Response: collision_flags + Sprite_CheckDeleteTouch.
-
-class Badnik extends Obj {
-  constructor(game, d) {
-    super(game, d);
-    this.priority = 0x280;
-    this.width_pixels = 0x14;
-    this.height_pixels = 0x10;
-    this.collision_flags = 0x0b;
-  }
-  update() {
-    this.think();
-    this.spriteCheckDeleteTouch();
-  }
-  think() {}
-  draw(vdp, cx, cy) {
-    const pieces = this.mappings && this.mappings[this.mapping_frame];
-    if (pieces) vdp.addSprite(pieces, Math.floor(this.x) - cx, Math.floor(this.y) - cy, this.art_tile, this.xflip, this.yflip, this.priority);
-  }
-}
-
-// Obj_Rhinobot: patrols, accelerates towards Sonic and skids when turning.
-class Rhinobot extends Badnik {
-  constructor(game, d) {
-    super(game, d);
-    this.map = game.maps(MAP.Rhinobot);
-    this.slot = game.rhinoSlot++ & 1;
-    this.art = 0x2500 + this.slot * 0x15;
-    this.dir = this.xflip ? 1 : -1;
-    this.vx = 0;
-    this.lastDplc = -1;
-    this.animT = 0;
-    this.skid = 0;
-    this.collision_flags = 0x0b;
-  }
-  think() {
-    const g = this.game, L = g.level, p = g.player;
-    const dx = p.x_pos - this.x;
-    const ahead = Math.sign(dx) === this.dir && Math.abs(dx) < 0x60 && Math.abs(p.y_pos - this.y) < 0x20;
-    const max = ahead ? 0x400 : 0x300;
-    if (this.skid > 0) {
-      this.skid--;
-      this.vx -= Math.sign(this.vx) * 0x20;
-      if (this.skid === 0) { this.dir = -this.dir; this.vx = 0; }
-    } else {
-      this.vx += this.dir * 0x10;
-      if (Math.abs(this.vx) > max) this.vx = Math.sign(this.vx) * max;
-      const fx = this.x + this.dir * 12;
-      const wall = L.solidAt(fx, this.y, 0, false) || L.solidAt(fx, this.y - 8, 0, false);
-      const ledge = !L.solidAt(fx, this.y + 20, 0) && !L.solidAt(fx, this.y + 28, 0);
-      if (wall || ledge || Math.abs(this.x - this.homeX()) > 0xa0 && Math.sign(this.x - this.homeX()) === this.dir) {
-        this.skid = 16;
-      }
-    }
-    this.x += this.vx / 256;
-    for (let i = 0; i < 16 && !L.solidAt(this.x, this.y + 16, 0); i++) this.y++;
-    for (let i = 0; i < 16 && L.solidAt(this.x, this.y + 15, 0); i++) this.y--;
-    this.xflip = this.dir > 0 ? !(this.skid > 0) : this.skid > 0;
-    this.animT = (this.animT + 1) % 16;
-    this.frame = this.skid > 0 ? 0 : [0, 1, 2, 3][(this.animT >> 2) & 3];
-  }
-  homeX() { return this.home ?? (this.home = this.x); }
-  draw(vdp, cx, cy) {
-    // DPLC must match the frame being drawn: reload right before queueing
-    this.game.objectDPLC(0x16732a, 0x16156e, this.frame, this.art);
-    super.draw(vdp, cx, cy);
-  }
-}
-
-// Obj_Bloominator: stationary flower cannon; fires spike balls upwards.
-class Bloominator extends Badnik {
-  constructor(game, d) {
-    super(game, d);
-    this.map = game.maps(MAP.Bloominator);
-    this.art = 0x252a;
-    this.t = 0;
-    this.collision_flags = 0x23;
-    this.width_pixels = 0xc;
-    this.height_pixels = 0x18;
-  }
-  think() {
-    this.t = (this.t + 1) % 160;
-    this.frame = this.t > 120 ? ((this.t >> 3) & 1) + 1 : 0;
-    if (this.t === 140) {
-      for (const dir of [-1, 1]) this.game.spawnProjectile(this.x + dir * 4, this.y - 20, dir * 0x100, -0x500, this.map, 4, this.art);
-    }
-  }
-}
-
-// Obj_MonkeyDude: climbs on palm trees and throws coconuts.
-class MonkeyDude extends Badnik {
-  constructor(game, d) {
-    super(game, d);
-    this.map = game.maps(MAP.MonkeyDude);
-    this.art = 0x2548;
-    this.t = 0;
-    this.by = this.y;
-    this.collision_flags = 0x0b;
-  }
-  think() {
-    const p = this.game.player;
-    this.t++;
-    this.y = this.by + Math.round(Math.sin(this.t / 30) * 16);
-    this.xflip = p.x_pos > this.x;
-    this.frame = (this.t >> 4) % 3;
-    if (this.t % 150 === 0 && Math.abs(p.x_pos - this.x) < 0xa0) {
-      const dir = this.xflip ? 1 : -1;
-      this.game.spawnProjectile(this.x + dir * 12, this.y - 8, dir * 0x200, -0x300, this.map, 6, this.art);
-    }
-  }
-}
-
 export { Projectile };
 
 const TYPES = {
   1: Monitor, 2: PathSwap, 4: CollapsingPlatform, 5: Rock, 7: Spring, 8: Spikes,
   40: InvisibleBlock, 52: StarPost, 53: Plant, 81: FloatingPlatform,
-  129: Bloominator, 130: Rhinobot, 131: MonkeyDude,
+  ...AIZ_TYPES, // objects-aiz.js: AIZ badniks and gimmicks
 };
+
+TYPES[84] = Bubbler; // Obj_Bubbler (water.js)
 
 export function createObject(game, d) {
   const T = TYPES[d.id];

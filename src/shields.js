@@ -2,6 +2,7 @@
 // Obj_BubbleShield. Art is streamed into VRAM at ArtTile_Shield with
 // PLCLoad_Shields (same DPLC format as Sonic), animated with Animate_Sprite.
 import { ART_TILE } from './rom.js';
+import { FireShieldDissipate } from './water.js';
 
 const ART_TILE_SHIELD = 0x79c;
 const S2_INVINCIBLE = 0x02, S2_SHIELD = 0x01, S2_FIRE = 0x10, S2_LTNG = 0x20, S2_BUBL = 0x40;
@@ -53,6 +54,14 @@ export class ShieldObject {
     this.visible = false;
     if ((p.status_secondary & S2_INVINCIBLE) || this.game.invincible > 0) return;
     if (p.anim === 0x1c || p.dead) return; // blank animation
+    // Obj_FireShield_DestroyUnderwater / Obj_LightningShield_DestroyUnderwater
+    if ((this.kind === 'fire' || this.kind === 'lightning') && (p.status & 0x40)) {
+      p.status_secondary &= 0x8e;
+      if (this.kind === 'fire') this.game.core.spawn(new FireShieldDissipate(this.game, p.x_pos, p.y_pos));
+      else this.game.water?.flashWhite(); // white flash of the underwater palette
+      this.setKind('insta');
+      return;
+    }
     // the player sets (Shield+anim) when an ability is used
     if (p.shield_anim) { this.anim = p.shield_anim; p.shield_anim = 0; }
     if (this.kind === 'insta') {
