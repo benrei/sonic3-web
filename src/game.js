@@ -3,6 +3,7 @@ import { ADDR, ART_TILE, ZONES } from './rom.js';
 import { Level } from './level.js';
 import { VDP, SCREEN_W, SCREEN_H } from './vdp.js';
 import { Player } from './player.js';
+import { createCharacter, leadCharacterFor } from './characters.js';
 import { createObject, Projectile } from './objects.js';
 import { ObjCore, Explosion } from './objcore.js';
 import { TileAnimator } from './animate.js';
@@ -30,7 +31,9 @@ export class Game {
     this.vdp = new VDP(this.level);
     const z = this.zone.id;
     this.animator = new TileAnimator(rom, this.level, this.vdp, ((z >> 8) << 1) | (z & 1), this);
-    this.player = new Player(rom, this.level);
+    // Player_1: Sonic unless the character mode picks Tails/Knuckles (see characters.js)
+    this.character = state.character ?? 'sonic';
+    this.player = createCharacter(leadCharacterFor(this.character), rom, this.level, this) ?? new Player(rom, this.level);
     this.player.onRingLoss = () => this.loseRings();
     this.player.onSound = (name, n) => this.audio?.play(name, n);
     this.sonicMap = this.maps(ADDR.Map_Sonic);

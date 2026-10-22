@@ -11,3 +11,18 @@ export const CHARACTER_MODES = [
 export function modesFor(rom) {
   return CHARACTER_MODES.filter((m) => m.available && (!m.requiresSK || rom?.sk));
 }
+
+// Player object factories, registered by each character module:
+//   registerCharacter('tails', (rom, level, game) => new Tails(rom, level, game))
+// game.js asks createLeadPlayer() for Player_1 and createSidekick() for Player_2 (Tails CPU in
+// "Sonic & Tails" mode). The default lead is Sonic (player.js).
+const factories = new Map();
+export function registerCharacter(id, factory) { factories.set(id, factory); }
+export function createCharacter(id, rom, level, game) {
+  const f = factories.get(id);
+  return f ? f(rom, level, game) : null;
+}
+// Which object is Player_1 for a mode ('sonic-tails' -> sonic, 'tails' -> tails, ...).
+export function leadCharacterFor(mode) {
+  return mode === 'tails' ? 'tails' : mode === 'knuckles' ? 'knuckles' : 'sonic';
+}
