@@ -23,8 +23,8 @@ main { display: flex; flex-direction: column; align-items: center; gap: 12px; pa
 .btn:hover { background: #ffe680; }
 #menu { background: #0b1440e6; }
 #menu h2 { margin: 0 0 .5em; color: #ffd94a; }
-#zone-list { list-style: none; padding: 0; margin: 0; columns: 2; column-gap: 2em; text-align: left; }
-#zone-list li { padding: .15em .6em; border-radius: 4px; cursor: pointer; break-inside: avoid; }
+#zone-list { list-style: none; padding: 0; margin: 0; display: grid; grid-auto-flow: column; grid-template-rows: repeat(6, auto); gap: .1em 2em; text-align: left; min-width: 22em; }
+#zone-list li { padding: .15em .6em; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 #zone-list li.sel { background: #ffd94a; color: #111; }
 #help { opacity: .8; font-size: 13px; text-align: center; max-width: 900px; }
 kbd { background: #222a4a; border: 1px solid #3a4572; border-radius: 4px; padding: 0 .35em; font-size: .9em; }

@@ -13,7 +13,9 @@ Bun.serve({
     const full = resolve(root, "." + normalize(path));
     if (!full.startsWith(root)) return new Response("Forbidden", { status: 403 });
     const file = Bun.file(full);
-    return (await file.exists()) ? new Response(file) : new Response("Not found", { status: 404 });
+    if (!(await file.exists())) return new Response("Not found", { status: 404 });
+    // always revalidate so deploys show up immediately (ETag/Last-Modified make this cheap)
+    return new Response(file, { headers: { "Cache-Control": "no-cache" } });
   },
 });
 console.log(`Sonic 3 web: http://localhost:${port}/`);
