@@ -2,6 +2,7 @@ import { Rom, ZONES } from './rom.js';
 import { Game } from './game.js';
 import { Audio } from './audio.js';
 import { SCREEN_W, SCREEN_H } from './vdp.js';
+import { modesFor } from './characters.js';
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
@@ -11,6 +12,8 @@ const menu = document.getElementById('menu');
 const zoneList = document.getElementById('zone-list');
 const menuHint = document.getElementById('menu-hint');
 const menuNote = document.getElementById('menu-note');
+const charSel = document.getElementById('char-select');
+const charName = document.getElementById('char-name');
 const errorEl = document.getElementById('error');
 const romInput = document.getElementById('rom-input');
 const audio = new Audio();
@@ -21,6 +24,8 @@ let rom = null;
 let game = null; // kept while the menu is open so Esc can resume it
 let paused = false;
 let menuIndex = 0;
+let onCharRow = false; // keyboard/gamepad focus on the character selector
+let character = localStorage.getItem('sonic3-character') || 'sonic';
 let carry = { lives: 3, score: 0 };
 let dirty = true;
 let toast = null; // { text, t }
@@ -57,11 +62,11 @@ function useRomBuffer(buf, remember) {
     errorEl.textContent = '';
     loader.hidden = true;
     game = null;
-    openMenu(rom.checksum !== 0x3ae0
-      ? 'Merk: filen er ikke den vanlige Sonic 3-utgaven (sjekksum $3AE0). Noe kan se rart ut.'
+    openMenu(rom.checksum !== 0x3ae0 && rom.checksum !== 0xa8f2
+      ? 'Merk: Sonic 3-delen av filen er ikke en utgave vi kjenner (sjekksum $3AE0 / $A8F2). Noe kan se rart ut.'
       : '');
   } catch (e) {
-    errorEl.textContent = 'Fant ikke Sonic 3 i denne filen. Velg en Sonic the Hedgehog 3 (Mega Drive/Genesis) .bin-fil på 2 MB – ikke Sonic & Knuckles eller Sonic 3 & Knuckles.';
+    errorEl.textContent = 'Fant ikke Sonic 3 i denne filen. Velg Sonic the Hedgehog 3 (.bin, 2 MB) eller Sonic 3 & Knuckles (.bin, 4 MB) for Mega Drive/Genesis – ikke Sonic & Knuckles alene.';
   }
 }
 
@@ -98,6 +103,7 @@ function openMenu(note = '') {
     zoneList.append(li);
   });
   document.getElementById('resume').hidden = !game || game.gameOver;
+  updateCharSelect();
   updateMenuHint();
   highlightMenu();
   dirty = true;
@@ -107,6 +113,22 @@ function closeMenuResume() {
   menu.hidden = true;
   dirty = true;
 }
+function updateCharSelect() {
+  const modes = modesFor(rom);
+  if (!modes.some((m) => m.id === character)) character = modes[0]?.id ?? 'sonic';
+  charSel.hidden = modes.length < 2;
+  charName.textContent = modes.find((m) => m.id === character)?.label ?? 'Sonic';
+  charSel.classList.toggle('sel', onCharRow);
+}
+function cycleCharacter(dir) {
+  const modes = modesFor(rom);
+  const i = modes.findIndex((m) => m.id === character);
+  character = modes[(i + dir + modes.length) % modes.length].id;
+  localStorage.setItem('sonic3-character', character);
+  updateCharSelect();
+}
+document.getElementById('char-prev').onclick = () => cycleCharacter(-1);
+document.getElementById('char-next').onclick = () => cycleCharacter(1);
 function highlightMenu() {
   [...zoneList.children].forEach((li, i) => {
     li.classList.toggle('sel', i === menuIndex);
@@ -121,6 +143,14 @@ function updateMenuHint() {
   }[lastInputKind];
 }
 function menuNavigate(p) {
+  if (onCharRow) {
+    if (p.left) cycleCharacter(-1);
+    if (p.right) cycleCharacter(1);
+    if (p.down || p.start || p.a || p.b || p.c) { onCharRow = false; updateCharSelect(); highlightMenu(); }
+    else if (p.back) closeMenuResume();
+    return;
+  }
+  if (p.up && menuIndex % ROWS === 0 && !charSel.hidden) { onCharRow = true; updateCharSelect(); [...zoneList.children].forEach((li) => li.classList.remove('sel')); return; }
   let col = Math.floor(menuIndex / ROWS), row = menuIndex % ROWS;
   if (p.down) row = (row + 1) % ROWS;
   if (p.up) row = (row + ROWS - 1) % ROWS;
@@ -143,7 +173,7 @@ function startZone(i, keepCheckpoint = false) {
   audio.unlock();
   menuIndex = i;
   menu.hidden = true;
-  const state = { ...carry };
+  const state = { ...carry, character };
   if (keepCheckpoint && game?.checkpoint) state.checkpoint = game.checkpoint;
   game = new Game(rom, i, audio, state);
   paused = false;

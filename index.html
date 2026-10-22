@@ -15,7 +15,7 @@
         <h1>Sonic the Hedgehog 3 <span>web-port</span></h1>
         <p>Denne siden er bare spillmotoren. Selve spillet – grafikk, baner og figurer – hentes fra
           <strong>spillfilen</strong> din: en kopi av Sonic&nbsp;3-kassetten til Mega Drive/Genesis
-          (ofte kalt en «ROM», en <code>.bin</code>-fil på 2&nbsp;MB).</p>
+          (ofte kalt en «ROM», en <code>.bin</code>-fil). Både Sonic&nbsp;3 (2&nbsp;MB) og Sonic&nbsp;3&nbsp;&amp;&nbsp;Knuckles (4&nbsp;MB) fungerer.</p>
         <label class="btn" for="rom-input">Velg spillfil…</label>
         <input id="rom-input" type="file" accept=".bin,.md,.gen,.smd,application/octet-stream">
         <p class="hint">…eller slipp filen hvor som helst på siden. Filen lastes ikke opp noe sted – den blir
@@ -24,6 +24,11 @@
       </div>
       <div id="menu" hidden>
         <h2>Velg sone</h2>
+        <p id="char-select" hidden>
+          <button id="char-prev" class="arrow" aria-label="Forrige figur">◀</button>
+          <span>Figur: <strong id="char-name">Sonic</strong></span>
+          <button id="char-next" class="arrow" aria-label="Neste figur">▶</button>
+        </p>
         <ol id="zone-list" role="listbox" aria-label="Soner"></ol>
         <p id="menu-note" class="note"></p>
         <p id="menu-hint" class="hint"></p>

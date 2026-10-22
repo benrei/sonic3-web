@@ -50,15 +50,32 @@ export const ZONES = [
 ];
 
 export class Rom {
+  // Accepts either Sonic 3 (2 MB) or Sonic 3 & Knuckles (4 MB lock-on: S&K at $000000,
+  // Sonic 3 at $200000). The Sonic 3 engine always works on the Sonic 3 image (`u8`);
+  // for S3&K the whole 4 MB image is kept in `full` (S&K labels from sonic3k.asm address it
+  // directly) and `sk` is true.
   constructor(buf) {
     // Always a plain Uint8Array (a Node Buffer's slice() would return a view, not a copy).
-    this.u8 = buf instanceof Uint8Array ? new Uint8Array(buf.buffer, buf.byteOffset, buf.length) : new Uint8Array(buf);
-    const name = String.fromCharCode(...this.u8.subarray(0x150, 0x162));
-    if (this.u8.length < 0x200000 || !name.startsWith('SONIC THE HEDGEH')) {
-      throw new Error('Dette ser ikke ut som en Sonic 3-ROM');
+    const all = buf instanceof Uint8Array ? new Uint8Array(buf.buffer, buf.byteOffset, buf.length) : new Uint8Array(buf);
+    const name = (u8, a) => String.fromCharCode(...u8.subarray(a + 0x150, a + 0x160));
+    this.sk = false;
+    if (all.length >= 0x400000 && name(all, 0).startsWith('SONIC & KNUCKLES') && name(all, 0x200000).startsWith('SONIC THE')) {
+      this.sk = true;
+      this.full = all;
+      this.u8 = all.subarray(0x200000, 0x400000);
+    } else if (all.length >= 0x200000 && name(all, 0).startsWith('SONIC THE')) {
+      this.full = null;
+      this.u8 = all.subarray(0, 0x200000);
+    } else {
+      throw new Error('Dette ser ikke ut som Sonic 3 eller Sonic 3 & Knuckles');
     }
     this.checksum = this.u16(0x18e);
   }
+  // Readers for the full S3&K image (S&K half + locked-on Sonic 3 half).
+  sku8(a) { return this.full[a]; }
+  sku16(a) { return (this.full[a] << 8) | this.full[a + 1]; }
+  sks16(a) { return (this.sku16(a) << 16) >> 16; }
+  sku32(a) { return ((this.full[a] << 24) | (this.full[a + 1] << 16) | (this.full[a + 2] << 8) | this.full[a + 3]) >>> 0; }
   u8at(a) { return this.u8[a]; }
   s8(a) { return (this.u8[a] << 24) >> 24; }
   u16(a) { return (this.u8[a] << 8) | this.u8[a + 1]; }

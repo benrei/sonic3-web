@@ -60,3 +60,6 @@ kbd { background: #222a4a; border: 1px solid #3a4572; border-radius: 4px; paddin
   #dpad { grid-column: 1; grid-row: 1; justify-self: center; }
   .abc { grid-column: 3; grid-row: 1; justify-self: center; }
 }
+#char-select { display: flex; align-items: center; gap: .8em; margin: 0 0 .6em; padding: .15em .6em; border-radius: 6px; }
+#char-select.sel { outline: 2px solid #ffd94a; }
+#char-select .arrow { background: #ffffff22; border: 0; color: #fff; border-radius: 6px; width: 2em; height: 1.8em; cursor: pointer; font: inherit; }
