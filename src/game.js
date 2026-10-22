@@ -3,9 +3,11 @@ import { ADDR, ART_TILE, ZONES } from './rom.js';
 import { Level } from './level.js';
 import { VDP, SCREEN_W, SCREEN_H } from './vdp.js';
 import { Player } from './player.js';
-import { createCharacter, leadCharacterFor } from './characters.js';
+import { createCharacter, leadCharacterFor, sidekickFor } from './characters.js';
 import { createObject, Projectile } from './objects.js';
 import { ObjCore, Explosion } from './objcore.js';
+import { padWord } from './tails.js'; // also registers the 'tails' / 'tails-cpu' characters
+import './knuckles.js'; // registers the 'knuckles' character (S3&K ROM only)
 import { TileAnimator } from './animate.js';
 import { Ram, R } from './ram.js';
 import { Camera } from './camera.js';
@@ -34,11 +36,14 @@ export class Game {
     // Player_1: Sonic unless the character mode picks Tails/Knuckles (see characters.js)
     this.character = state.character ?? 'sonic';
     this.player = createCharacter(leadCharacterFor(this.character), rom, this.level, this) ?? new Player(rom, this.level);
+    // PLCID_07 instead of PLCID_01 in "Tails alone": Tails' life icon on the HUD
+    if (this.character === 'tails') for (const { src, vram } of rom.plc(0x07)) this.vdp.writeVram(vram, rom.nem(src));
     this.player.onRingLoss = () => this.loseRings();
     this.player.onSound = (name, n) => this.audio?.play(name, n);
     this.sonicMap = this.maps(ADDR.Map_Sonic);
     this.ringMap = this.maps(ADDR.Map_Ring);
-    this.hudMap = this.maps(MAP_HUD);
+    // S3&K's Map_HUD ($DBB6) lays the life icon out for every character's name (KNUCKLES etc.)
+    this.hudMap = rom.sk && this.character === 'knuckles' ? rom.skMappings(0xdbb6) : this.maps(MAP_HUD);
     this.explosionMap = this.maps(MAP_EXPLOSION);
     this.lastDplcFrame = -1;
     this.rings = 0;
@@ -66,12 +71,28 @@ export class Game {
     const ends = this.level.objects.filter((o) => END_OBJECTS.includes(o.id)).map((o) => o.x);
     this.endX = this.zone.id === 0x500 ? 0x6900 // ICZ1 switches to ICZ2 at camera X $6900
       : ends.length ? Math.min(...ends) - 0x80 : Infinity;
+    // Knuckles' acts end at his own bosses in some zones (knuckles.js)
+    this.endX = this.player.actEndX?.(this.zone, this.endX) ?? this.endX;
     this.camX = 0;
     this.camY = 0;
     this.centerCamera();
+    // Player_2: the Tails CPU sidekick in "Sonic & Tails" (characters.js / tails.js), placed
+    // like SpawnLevelMainSprites_SpawnPlayers: $20 left of and 4 below Player_1
+    this.sidekick = null;
+    const sk = sidekickFor(this.character);
+    if (sk) {
+      const t = createCharacter(sk, rom, this.level, this);
+      if (t) {
+        t.x_pos = this.player.x_pos - 0x20;
+        t.y_pos = this.player.y_pos + 4;
+        t.onSound = (name, n) => this.audio?.play(name, n);
+        this.sidekick = t;
+      }
+    }
     // object manager / ring manager / touch response (objcore.js); Load_Sprites runs here
     new ObjCore(this, createObject);
     this.water = new Water(this); // water palette, Dust / Breathing_bubbles / Wave_Splash (water.js)
+    this.player.levelInit?.(this); // e.g. Knuckles' colours in the water palette
     // SpawnLevelMainSprites: level intro objects (ICZ1 snowboard, LBZ1 launch; intros.js)
     this.ctrl1Locked = false; // Ctrl_1_locked
     this.ctrl1Logical = null; // Ctrl_1_logical while locked
@@ -124,7 +145,8 @@ export class Game {
   sfx(name) { this.audio?.play(name); }
 
   // --- per-frame ---------------------------------------------------------
-  update(input) {
+  // input = Ctrl_1, input2 = Ctrl_2 (second controller, takes over the Tails sidekick)
+  update(input, input2 = null) {
     this.frameCount++;
     const p = this.player;
     if (this.titleCard > 0) this.titleCard--;
@@ -145,9 +167,13 @@ export class Game {
     if (!freeze) {
       const control = p.routine === 2;
       this.ctrl1 = input; // Ctrl_1; Obj_Sonic only copies it to Ctrl_1_logical while unlocked
-      p.update(this.ctrl1Locked ? this.ctrl1Logical ?? { held: {}, pressed: {} } : input);
+      const logical = this.ctrl1Locked ? this.ctrl1Logical ?? { held: {}, pressed: {} } : input;
+      this.ctrl1LogicalWord = padWord(logical); // Stat_table (Sonic_RecordPos)
+      p.update(logical);
       // Sonic_Control ends with TouchResponse (rings, shield deflection, object touches)
       if (control && !(p.object_control & 0xa0)) this.core.touchResponse();
+      // Player_2 (Tails_Control incl. Tails_CPU_Control and his TouchResponse)
+      this.sidekick?.update(input2);
       (this.shieldObj ??= new ShieldObject(this)).update(); // Obj_*Shield runs right after the player
     }
     if (p.dead || p.dying) this.handleDeath();
@@ -155,6 +181,8 @@ export class Game {
 
     // Process_Sprites: level objects run after the player, before the camera moves
     if (!freeze) this.core.runObjects();
+    // objects in the slots after the level objects (Obj_Tails_Tail)
+    if (!freeze) for (const pl of this.core.players()) pl.afterObjects?.();
 
     this.updateCamera();
     this.animator.animateTiles(); // Animate_Tiles (after ScreenEvents in LevelLoop)
@@ -298,6 +326,7 @@ export class Game {
     const vdp = this.vdp, cx = this.camX | 0, cy = this.camY | 0;
     // Sonic first so he's in front of objects with the same priority (lower order = front)
     this.drawPlayer(cx, cy);
+    this.sidekick?.drawSelf(vdp, cx, cy); // Player_2 is behind Player_1
     this.core.draw(vdp, cx, cy); // Render_Rings + displayed objects
     this.drawHUD();
     this.water.prepareRender(vdp); // Water_full_screen_flag / H_int_counter -> line palettes
@@ -308,12 +337,18 @@ export class Game {
   drawPlayer(cx, cy) {
     const p = this.player;
     const frame = p.mapping_frame | 0;
-    if (frame !== this.lastDplcFrame) {
+    if (frame !== this.lastDplcFrame && !p.drawSelf) {
       this.lastDplcFrame = frame;
       this.loadPlayerArt(frame);
     }
     // shield / insta-shield object (updated here, once per rendered game frame)
     this.shieldObj?.draw(this.vdp, cx, cy);
+    if (p.drawSelf) {
+      // characters with their own art / DPLC (tails.js)
+      p.drawSelf(this.vdp, cx, cy);
+      if (this.invincible > 0 || (p.status_secondary & 0x02)) this.drawAura(p.x_pos - cx, p.y_pos - cy);
+      return;
+    }
     if (p.visible === false && !p.dying) return;
     const pieces = this.sonicMap[frame];
     if (!pieces) return;

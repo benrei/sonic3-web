@@ -8,8 +8,9 @@
 //         plus the Dust object's anim 4 (Obj_DashDust loc_1796C, the splash).
 // Ctrl_1_locked / Ctrl_1_logical are modelled by game.ctrl1Locked / game.ctrl1Logical (Obj_Sonic
 // copies the pad into Ctrl_1_logical only while the lock is clear); game.ctrl1 is the raw pad.
-// Only Player 1 (Sonic) is handled: the Tails variants (Obj_LevelIntroICZ1Tails, Player_2 parts)
-// are not ported.
+// ICZ1 "Tails alone": Obj_LevelIntroICZ1Tails ($39164 -> loc_391C2 / loc_391EC). The LBZ1 launch
+// also throws Player_2 (the Tails sidekick) out of the ground; the ICZ1 snowboard intro is
+// Player_1 only (the sidekick waits off-level until Sonic passes x $3880, see tails.js).
 import { Obj } from './objcore.js';
 import { R } from './ram.js';
 
@@ -34,6 +35,7 @@ const DPLC_DashSplashDrown = 0x17c2e; // SplashDrown_Load_DPLC
 const ArtUnc_SplashDrown = 0xc2280; // loc_1796C
 
 const s16 = (v) => (v << 16) >> 16;
+const u16 = (v) => v & 0xffff;
 const byte_38AF0 = [4, 5, 2, 1, 1, 1, 1, 1, 0, 1, 2, 0, 1, 2, 0, 4];
 
 // SpawnLevelMainSprites: the level-start part (no star post hit). Runs the intro object's first
@@ -44,9 +46,28 @@ export function spawnLevelIntro(game) {
   const p = game.player, z = game.zone.id;
   let o = null;
   if (z === 0x100 || z === 0x200) {
-    // loc_4DFE / loc_4E36
+    // loc_4DFE / loc_4E36 (Player_2 too; in HCZ1 Tails - and Tails alone - start "jumping")
     p.anim = 0x1b;
     p.status |= S_INAIR;
+    if (z === 0x100 && game.character === 'tails') p.jumping = 1;
+    if (z === 0x100 && game.character === 'knuckles') {
+      // S3&K loc_6834: Knuckles falls into HCZ1 in his glide-fall pose (anim/prev_anim $21,
+      // anim_frame 1; the anim_frame_timer write goes to a0 in the original, not to him)
+      p.anim = 0x21;
+      p.prev_anim = 0x21;
+      p.anim_frame = 1;
+    }
+    const p2 = game.sidekick;
+    if (p2) {
+      p2.anim = 0x1b;
+      p2.status |= S_INAIR;
+      if (z === 0x100) p2.jumping = 1;
+    }
+  } else if (z === 0x500 && game.character === 'knuckles') {
+    // S3&K: no snowboard intro for Knuckles (Player_mode 3); ICZ1_ScreenInit starts him at
+    // $3640,$660 (knuckles.js). Obj_ICZTeleporter is not ported.
+  } else if (z === 0x500 && game.character === 'tails') {
+    o = new LevelIntroICZ1Tails(game);
   } else if (z === 0x500) {
     o = new LevelIntroICZ1(game);
   } else if (z === 0x600) {
@@ -107,12 +128,13 @@ export class LevelIntroPlayerLaunchFromGround extends Obj {
     this.state = 0;
   }
   update() {
-    const g = this.game, p = g.player;
+    const g = this.game, p = g.player, p2 = g.sidekick;
+    const both = p2 ? [p, p2] : [p]; // Player_1, then Player_2 if the slot is in use
     if (this.state === 0) {
       this.state = 1; // move.l #loc_3907E,(a0)
       lockCtrl(g);
       this.anim_frame_timer = 30;
-      p.object_control = 3; // sub_39076
+      for (const q of both) q.object_control = 3; // sub_39076
       return;
     }
     lockCtrl(g); // Ctrl_1_locked = 1, Ctrl_1_logical = 0
@@ -120,27 +142,83 @@ export class LevelIntroPlayerLaunchFromGround extends Obj {
       // loc_3907E
       if (--this.anim_frame_timer !== 0) return;
       this.state = 2; // loc_3909E -> sub_390B2
-      p.y_vel = -0xb00;
-      p.status |= S_INAIR;
-      p.jumping = 0;
-      p.anim = 0x10;
-      p.object_control = 1;
+      for (const q of both) {
+        q.y_vel = -0xb00;
+        q.status |= S_INAIR;
+        q.jumping = 0;
+        q.anim = 0x10;
+        q.object_control = 1;
+      }
       return;
     }
     // loc_390D0
     if ((p.y_pos & 0xffff) >= 0x5c0) {
-      // loc_3913A -> sub_39144
-      p._x = (p._x + (p.x_vel << 8)) | 0;
-      const yv = p.y_vel;
-      p.y_vel = s16(yv + 0x38);
-      p._y = (p._y + (yv << 8)) | 0;
+      // loc_3913A -> sub_39144 (Player_1, Player_2)
+      for (const q of both) {
+        q._x = (q._x + (q.x_vel << 8)) | 0;
+        const yv = q.y_vel;
+        q.y_vel = s16(yv + 0x38);
+        q._y = (q._y + (yv << 8)) | 0;
+      }
       return;
     }
     p.object_control = 0;
     // move.w #4<<8,(Dust+anim) / move.w #$5C0,(Dust+y_pos)
     this.core.spawn(new DashDustSplash(g, p.x_pos, 0x5c0));
+    if (p2) {
+      p2.object_control = 0;
+      this.core.spawn(new DashDustSplash(g, p2.x_pos, 0x5c0)); // Dust_P2
+    }
     g.sfx('skid'); // sfx_SandSplash (no dedicated synth sound)
     g.ctrl1Locked = false;
+    this.delete();
+  }
+}
+
+// ============================================================================ ICZ1 (Tails alone)
+// Obj_LevelIntroICZ1Tails: Tails slides down the snowy slope rolled up (x_vel $800, controls
+// locked), and at x $38F0 crashes and bounces back (anim $19, screen shake).
+export class LevelIntroICZ1Tails extends Obj {
+  constructor(game) {
+    super(game, {});
+    this.state = 0;
+  }
+  update() {
+    const g = this.game, p = g.player;
+    if (this.state === 0) {
+      this.state = 1; // move.l #loc_391C2,(a0)
+      p.x_vel = 0x800;
+      p.y_vel = 0x480;
+      p.ground_vel = 0x800;
+      p.status |= S_INAIR;
+      p.jumping = 0;
+      p.y_radius = 0xe;
+      p.x_radius = 7;
+      p.anim = 2;
+      p.status |= S_ROLL;
+      p.object_control = 3;
+      lockCtrl(g);
+      this.anim_frame_timer = 30;
+      return;
+    }
+    lockCtrl(g);
+    if (this.state === 1) {
+      // loc_391C2
+      if (--this.anim_frame_timer !== 0) return;
+      p.object_control = 0; // loc_391DC
+      this.state = 2;
+      return;
+    }
+    // loc_391EC
+    if (u16(p.x_pos) < 0x38f0) return;
+    p.status |= S_INAIR;
+    p.x_vel = -0x200;
+    p.y_vel = -0x400;
+    p.anim = 0x19;
+    p.object_control = 0;
+    g.ctrl1Locked = false;
+    g.ram.setW(R.Screen_shake_flag, 0x14);
+    g.sfx('destroy'); // sfx_Crash
     this.delete();
   }
 }

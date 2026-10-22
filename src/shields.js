@@ -65,6 +65,8 @@ export class ShieldObject {
     // the player sets (Shield+anim) when an ability is used
     if (p.shield_anim) { this.anim = p.shield_anim; p.shield_anim = 0; }
     if (this.kind === 'insta') {
+      // Only Sonic has the Insta-Shield (SpawnLevelMainSprites); Tails' double_jump_flag is flight
+      if (p.character_id) { this.visible = false; return; }
       // Obj_InstaShield_Main: idle anim 0 shows nothing (frame 6 = empty)
       this.animate();
       if (this.frame === 7 && p.double_jump_flag === 1) p.double_jump_flag = 2; // attack over

@@ -58,6 +58,7 @@ export class Camera {
   resetPosTable() {
     const m = this.m, p = this.player;
     for (let i = 0; i < 0x100; i += 4) { m.setW(R.Pos_table + i, p.x_pos); m.setW(R.Pos_table + i + 2, p.y_pos); }
+    for (let i = 0; i < 0x100; i += 4) m.setL(R.Stat_table + i, 0); // Pos_table_P2 = Stat_table
     m.setW(R.Pos_table_index, 0);
   }
 
@@ -67,6 +68,9 @@ export class Camera {
     const i = m.uw(R.Pos_table_index);
     m.setW(R.Pos_table + i, p.x_pos);
     m.setW(R.Pos_table + i + 2, p.y_pos);
+    // Stat_table: Ctrl_1_logical and status(a0) (+ the next byte), read by Tails_CPU_Control
+    m.setW(R.Stat_table + i, this.game.ctrl1LogicalWord ?? 0);
+    m.setW(R.Stat_table + i + 2, ((p.status & 0xff) << 8) | (p.status_secondary & 0xff));
     m.setB(R.Pos_table_index + 1, m.ub(R.Pos_table_index + 1) + 4);
   }
 
@@ -258,7 +262,10 @@ export class Camera {
   initWater() {
     const m = this.m, z = this.zoneAct;
     const zone = z >> 8;
-    const flag = zone === 0 || zone === 1 || z === 0x301 || z === 0x501 || z === 0x601;
+    // S3&K CheckLevelForWater: no water in AIZ2 for Knuckles when AIZ2 is loaded directly
+    // (Apparent_zone_and_act = AIZ2, as here; he has water when arriving from AIZ1)
+    const knux = this.player.character_id === 2;
+    const flag = z === 0 || (z === 1 && !knux) || zone === 1 || z === 0x301 || z === 0x501 || z === 0x601;
     m.setB(R.Water_flag, flag ? 1 : 0);
     const h = this.rom.u16(STARTING_WATER_HEIGHTS + this.actIdx * 2);
     m.setW(R.Water_level, h);
@@ -305,8 +312,14 @@ export class Camera {
         break;
       }
       case 2: this.waterFromX(WATER_HCZ1); break;
-      case 3: this.waterFromX(WATER_HCZ2); break; // (_unkFAA2 is never set without the HCZ2 wall object)
+      case 3: // (_unkFAA2 is never set without the HCZ2 wall object)
+        if (this.player.character_id === 2) this.waterFromList([0x700, 0x4100, 0x8360, 0xffff]); // word_6EC2 (S3&K)
+        else this.waterFromX(WATER_HCZ2);
+        break;
       case 12: this.waterFromX(WATER_LBZ1); break;
+      case 13: // S3&K DynamicWaterHeight_LBZ2: Knuckles only (_unkF7C2 is set by LBZ2 events, not ported)
+        if (this.player.character_id === 2) this.waterFromList([0x8ff0, 0xd80, 0x8b20, 0xffff]); // word_6F12
+        break;
       default: break;
     }
     if (this.shakeTimer > 0 && --this.shakeTimer === 0) m.setW(R.Screen_shake_flag, 0);
@@ -317,6 +330,15 @@ export class Camera {
   }
 
   // loc_537C: (target, x) table; bit 15 of the height = set the mean level immediately
+  // the same with an inline (target, x) list (S3&K tables for Knuckles)
+  waterFromList(list) {
+    const m = this.m, cx = this.camX();
+    let i = 0, h, x;
+    do { h = list[i]; x = list[i + 1]; i += 2; } while (cx > x);
+    if (h & 0x8000) { h &= 0x7fff; m.setW(R.Mean_water_level, h); }
+    m.setW(R.Target_water_level, h);
+  }
+
   waterFromX(table) {
     const m = this.m, cx = this.camX();
     let a = table, h, x;
@@ -341,7 +363,8 @@ RESIZE[0] = function () {
       if (this.camX() < 0x1000) return;
       m.setW(R.Camera_min_X_pos, this.camX());
       if (this.camX() < 0x1308) return;
-      // (PLC $0B / PalID_AIZ reload / Tails_CPU_routine skipped)
+      // (PLC $0B / PalID_AIZ reload skipped) move.w #2,(Tails_CPU_routine).w: the sidekick flies in
+      if (this.game.sidekick) this.game.sidekick.cpuRoutine = 2;
       this.nextRoutine();
       return;
     case 2: // loc_1A96C
@@ -356,7 +379,7 @@ RESIZE[0] = function () {
       this.setPalette(0x40 + 0x1e, this.camX() >= 0x2b00 ? 0x004 : 0x20e);
       if (this.camX() >= 0x2c00) m.setW(R.Camera_min_Y_pos, 0x2e0);
       if (this.camX() < 0x2d80) return;
-      this.setPalette(0x40 + 0x1e, 0xc02);
+      this.setPalette(0x40 + 0x1e, this.player.character_id === 2 ? 0xe40 : 0xc02); // S3&K: word_4FAEA for Knuckles
       m.setW(R.Camera_min_X_pos, 0x2d80);
       // (PLC $5A skipped)
       this.nextRoutine();
@@ -376,6 +399,7 @@ RESIZE[0] = function () {
 
 // AIZ2_Resize
 RESIZE[1] = function () {
+  if (this.player.character_id === 2) return aiz2KnuxResize.call(this); // S3&K loc_1C64E
   const m = this.m, cx = this.camX();
   const setMaxY = (v) => { m.setW(R.Camera_max_Y_pos, v); m.setW(R.Camera_target_max_Y_pos, v); };
   switch (this.routine()) {
@@ -432,6 +456,42 @@ RESIZE[1] = function () {
     default: return; // AIZ2_ResizeEnd
   }
 };
+
+// S3&K AIZ2_KnuxResize1-5 (Dynamic_resize_routine $12-$1C). AIZ2 is loaded directly here
+// (Apparent_zone_and_act = AIZ2), so KnuxResize2 (his AIZ miniboss at $11D0,$420) is skipped
+// like in the original. Bombership art / PalID_AIZBoss loading skipped.
+function aiz2KnuxResize() {
+  const m = this.m, cx = this.camX();
+  if (this.routine() < 0x12) m.setB(R.Dynamic_resize_routine, 0x12);
+  switch (this.routine()) {
+    case 0x12: // AIZ2_KnuxResize1
+      if (cx < 0x2e0) return;
+      m.setW(R.Camera_max_Y_pos, 0x590);
+      m.setW(R.Camera_target_max_Y_pos, 0x590);
+      this.nextRoutine();
+      m.setW(R.Camera_min_X_pos, 0x1040); // Apparent_zone_and_act == 1
+      this.nextRoutine();
+      return;
+    case 0x16: // AIZ2_KnuxResize3
+      if (cx < 0x11a0) return;
+      m.setW(R.Camera_target_max_Y_pos, 0x820);
+      this.nextRoutine();
+      return;
+    case 0x18: // AIZ2_KnuxResize4
+      if (cx < 0x3b80) return;
+      m.setW(R.Camera_min_X_pos, 0x3b80);
+      m.setW(R.Camera_target_max_Y_pos, 0x5da);
+      m.setW(R.Events_fg_5, -1);
+      this.nextRoutine();
+      return;
+    case 0x1a: // AIZ2_KnuxResize5
+      if (cx < 0x3f80) return;
+      m.setW(R.Camera_min_X_pos, 0x3f80);
+      this.nextRoutine();
+      return;
+    default: return; // AIZ2_KnuxResizeEnd
+  }
+}
 
 // HCZ1_Resize: palette line 4 swap around the start area
 RESIZE[2] = function () {

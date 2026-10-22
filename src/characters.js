@@ -2,10 +2,10 @@
 // 2 Tails alone, 3 Knuckles alone). `available` is switched on once a mode is implemented;
 // Knuckles needs the Sonic 3 & Knuckles ROM.
 export const CHARACTER_MODES = [
-  { id: 'sonic-tails', playerMode: 0, label: 'Sonic & Tails', requiresSK: false, available: false },
+  { id: 'sonic-tails', playerMode: 0, label: 'Sonic & Tails', requiresSK: false, available: true },
   { id: 'sonic', playerMode: 1, label: 'Sonic', requiresSK: false, available: true },
-  { id: 'tails', playerMode: 2, label: 'Tails', requiresSK: false, available: false },
-  { id: 'knuckles', playerMode: 3, label: 'Knuckles', requiresSK: true, available: false },
+  { id: 'tails', playerMode: 2, label: 'Tails', requiresSK: false, available: true },
+  { id: 'knuckles', playerMode: 3, label: 'Knuckles', requiresSK: true, available: true },
 ];
 
 export function modesFor(rom) {
@@ -25,4 +25,8 @@ export function createCharacter(id, rom, level, game) {
 // Which object is Player_1 for a mode ('sonic-tails' -> sonic, 'tails' -> tails, ...).
 export function leadCharacterFor(mode) {
   return mode === 'tails' ? 'tails' : mode === 'knuckles' ? 'knuckles' : 'sonic';
+}
+// Which object is Player_2 for a mode (null = none): the Tails CPU in "Sonic & Tails".
+export function sidekickFor(mode) {
+  return mode === 'sonic-tails' ? 'tails-cpu' : null;
 }

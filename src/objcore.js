@@ -1,6 +1,9 @@
 // Object core: faithful ports of the Sonic 3 object-system routines (s3.asm).
 // Labels in comments are the original ones; loc_xxxxx labels are ROM addresses.
-// All tables are read from the ROM. Only Player 1 is handled (no Tails / 2P).
+// All tables are read from the ROM. Player_1 (game.player) and Player_2 (game.sidekick, the
+// Tails CPU in "Sonic & Tails") are handled like the original: the solid routines run for both
+// players with per-player standing/pushing bits (p1 = bit 3/5, p2 = bit 4/6) and TouchResponse
+// is called by each player object.
 //
 // ============================================================================ API
 // The game owns one `ObjCore` (game.core). Per frame the game calls, in the
@@ -29,13 +32,20 @@
 //   outOfRange(x?) the $280 coarse window test;  objCheckFloorDist() ObjCheckFloorDist -> d1 (sets this.floorAngle)
 //   respawnByte get/set: the object's byte in Object_respawn_table
 // Solid routines (return d4: 0 none, 1 side, -1 top, -2 bottom; core.d6 gets the
-// "swapped" touch bits TOUCH_SIDE / TOUCH_BOTTOM / TOUCH_TOP for Player 1):
-//   core.solidObjectFull(o,d1,d2,d3,d4)   SolidObjectFull (needs on-screen)
-//   core.solidObjectFull2(o,d1,d2,d3,d4)  SolidObjectFull2 (always)
-//   core.solidObjectCont(o,d1,d2,d3,d4)   SolidObject_cont
+// "swapped" touch bits TOUCH_SIDE / TOUCH_BOTTOM / TOUCH_TOP for Player 1, the same bits << 1
+// for Player 2 (P2_TOUCH_*)). The plain names are the two-player routines of the original
+// (Player_1, then Player_2; d4 is the last player's result):
+//   core.solidObjectFull(o,d1,d2,d3,d4)   SolidObjectFull (P2 only while on screen)
+//   core.solidObjectFull2(o,d1,d2,d3,d4)  SolidObjectFull2
 //   core.solidObjectTop(o,d1,d3,d4)       SolidObjectTop
 //   core.solidObjectTopSloped2(o,d1,slope,d4) SolidObjectTopSloped2 (slope = byte array)
-//   core.solidObjectSloped(o,d1,d2,slope,d4)  sub_1BADA (full solid with slope, diagonal springs)
+//   core.solidObjectSloped(o,d1,d2,slope,d4)  sub_1BAC4 (-> sub_1BADA; diagonal springs)
+// Single-player variants take the player index last (0 = Player_1, 1 = Player_2) and work on
+// that player's bits: solidObjectFull_1P, solidObjectFull2_1P, solidObjectTop_1P,
+// solidObjectTopSloped2_1P, solidObjectSloped_1P. solidObjectCont / mvSonicOnPtfm /
+// rideObjectSetRide / solidObjSloped2 act on the current player context (core.player,
+// core.standBit, core.pushBit), which core.asPlayer(i, fn) switches (Player_1 otherwise).
+// core.players(): [Player_1, Player_2?]; core.playerBits(i) -> { stand, push, touch shift }.
 // Touch types (collision_flags TT SSSSSS): 00 enemy (destroyed by Touch_EnemyNormal ->
 // Obj_Explosion + score, unless boss_hitcount2), 01 special (routine := 4 when touched,
 // size 6 = monitor), 10 harmful (HurtCharacter), 11 boss/special counter (collision_property++).
@@ -44,8 +54,10 @@
 // core.giveRing(), core.addScore(pts/10), core.oscByte(ofs)/oscWord(ofs) (Oscillating_table),
 // core.sincos(a) -> [sin,cos], core.arctan(dx,dy).
 
-export const P1_STANDING = 0x08, P1_PUSHING = 0x20;
+export const P1_STANDING = 0x08, P1_PUSHING = 0x20, P2_STANDING = 0x10, P2_PUSHING = 0x40;
+export const STANDING_MASK = 0x18, PUSHING_MASK = 0x60;
 export const TOUCH_SIDE = 1, TOUCH_BOTTOM = 4, TOUCH_TOP = 0x10;
+export const P2_TOUCH_SIDE = 2, P2_TOUCH_BOTTOM = 8, P2_TOUCH_TOP = 0x20;
 const S_INAIR = 2, S_ONOBJ = 8, S_PUSH = 0x20;
 const SS_SHIELD = 1, SS_INVINCIBLE = 2, SS_LTNG = 0x20;
 
@@ -455,7 +467,10 @@ export class ObjCore {
     game.core = this;
     this.game = game;
     this.rom = game.rom;
-    this.player = game.player;
+    this.player = game.player; // current player context (a1 in the solid / touch routines)
+    this.standBit = P1_STANDING; // d6: p1_standing_bit / p2_standing_bit
+    this.pushBit = P1_PUSHING;
+    this.touchShift = 0; // P2's touch bits are P1's << 1
     this.level = game.level;
     this.createObject = createObject;
     const rom = this.rom;
@@ -493,13 +508,43 @@ export class ObjCore {
     this.layout = [];
     const idx = ((game.level.zoneAct >> 8) << 1) | (game.level.zoneAct & 1);
     let op = rom.u32(SPRITE_LOC_PTRS + idx * 4);
-    for (let i = 0; i < 4000; i++, op += 6) {
+    // (Knuckles: the S3&K layout of the act, with IDs translated to Sonic 3's; knuckles.js)
+    if (game.level.objectLayout) this.layout = game.level.objectLayout.map((e) => ({ ...e }));
+    else for (let i = 0; i < 4000; i++, op += 6) {
       const x = rom.u16(op);
       if (x === 0xffff) break;
       this.layout.push({ x, yw: rom.u16(op + 2), id: rom.u8[op + 4], subtype: rom.u8[op + 5] });
     }
     this.respawnTable = new Uint8Array(this.layout.length + 1); // Object_respawn_table
     this.loadSpritesInit();
+  }
+
+  // ------------------------------------------------------------------ players
+  // Player_1 and (if present) Player_2
+  players() { const g = this.game; return g.sidekick ? [g.player, g.sidekick] : [g.player]; }
+  playerIndex(p) { return p === this.game.player ? 0 : 1; }
+  playerBits(i) { return i ? { stand: P2_STANDING, push: P2_PUSHING, shift: 1 } : { stand: P1_STANDING, push: P1_PUSHING, shift: 0 }; }
+  // lea (Player_x).w,a1 / moveq #px_standing_bit,d6: run fn with player i as the context
+  asPlayer(i, fn) {
+    const sp = this.player, ss = this.standBit, sh = this.pushBit, st = this.touchShift;
+    const p = i ? this.game.sidekick : this.game.player;
+    this.player = p;
+    this.standBit = i ? P2_STANDING : P1_STANDING;
+    this.pushBit = i ? P2_PUSHING : P1_PUSHING;
+    this.touchShift = i ? 1 : 0;
+    try { return fn(p, i); } finally { this.player = sp; this.standBit = ss; this.pushBit = sh; this.touchShift = st; }
+  }
+  // the two-player wrappers (SolidObjectFull etc.): Player_1, then Player_2 with d6 kept
+  _both(fn, p2Cond) {
+    this.d6 = 0;
+    let d4 = this.asPlayer(0, fn);
+    const d6 = this.d6;
+    const p2 = this.game.sidekick;
+    if (p2 && (!p2Cond || p2Cond(p2))) {
+      d4 = this.asPlayer(1, fn);
+      this.d6 |= d6;
+    }
+    return d4;
   }
 
   // ------------------------------------------------------------------ helpers
@@ -516,7 +561,7 @@ export class ObjCore {
     const i = this.objects.indexOf(old);
     old.alive = false;
     obj.respawn = old.respawn;
-    if (this.player.interact === old) this.player.interact = obj; // same RAM slot
+    for (const p of this.players()) if (p.interact === old) p.interact = obj; // same RAM slot
     if (i >= 0) this.objects[i] = obj; else this.objects.push(obj);
     return obj;
   }
@@ -616,11 +661,16 @@ export class ObjCore {
   killCharacter() { this.player.kill(); return -1; }
 
   // ------------------------------------------------------------------ TouchResponse
-  touchResponse() {
+  // Called at the end of each player's control routine (a0 = that player; Player_1 by default).
+  touchResponse(player = this.game.player) {
+    return this.asPlayer(this.playerIndex(player), () => this._touchResponse());
+  }
+  _touchResponse() {
     const p = this.player;
     this.testRingCollisions();
     this.shieldTouchResponse();
-    if (!(p.status_secondary & 0x73) && p.double_jump_flag === 1) {
+    // the Insta-Shield attack box is Sonic's only (tst.b character_id(a0))
+    if (!(p.character_id ?? 0) && !(p.status_secondary & 0x73) && p.double_jump_flag === 1) {
       // insta-shield: temporarily invincible with a $30x$30 box
       const saved = p.status_secondary;
       p.status_secondary |= SS_INVINCIBLE;
@@ -656,7 +706,8 @@ export class ObjCore {
     if (t === 0xc0) return this.touchSpecial(o);
     if (t & 0x80) return this.touchChkHurt(o);
     if ((o.collision_flags & 0x3f) === 6) return this.touchMonitor(o);
-    if (p.invulnerable_time >= 90) return 0;
+    // the main character's invulnerability_timer decides (not competition mode)
+    if (this.game.player.invulnerable_time >= 90) return 0;
     o.routine = 4;
     return 0;
   }
@@ -671,7 +722,10 @@ export class ObjCore {
       if (o.routine_secondary === 0) o.routine_secondary = 4;
       return 0;
     }
-    if (p.anim !== 2) return 0;
+    // .checkdestroy: only the main character breaks monitors (outside competition mode)
+    if (p !== this.game.player) return 0;
+    // Knuckles also breaks monitors while gliding (double_jump_flag 1) or sliding (3)
+    if (p.anim !== 2 && !(p.character_id === 2 && (p.double_jump_flag === 1 || p.double_jump_flag === 3))) return 0;
     p.y_vel = s16(-p.y_vel);
     o.routine = 4;
     o.parent = p;
@@ -681,7 +735,14 @@ export class ObjCore {
   // Touch_Enemy
   touchEnemy(o) {
     const p = this.player;
-    if (!(p.status_secondary & SS_INVINCIBLE) && p.anim !== 9 && p.anim !== 2) return this.touchChkHurt(o);
+    const knuxAttack = p.character_id === 2 && (p.double_jump_flag === 1 || p.double_jump_flag === 3); // gliding / sliding
+    if (!(p.status_secondary & SS_INVINCIBLE) && p.anim !== 9 && p.anim !== 2 && !knuxAttack) {
+      if (p.character_id === 2) return this.touchChkHurt(o);
+      // Tails flying (not underwater) hits enemies that are above him
+      if (p.character_id !== 1 || !p.double_jump_flag || (p.status & 0x40)) return this.touchChkHurt(o);
+      const a = this.arctan(s16(p.x_pos - o.x_pos), s16(p.y_pos - o.y_pos));
+      if (((a - 0x20) & 0xff) >= 0x40) return this.touchChkHurt(o);
+    }
     if (o.boss_hitcount2) {
       p.x_vel = s16(-p.x_vel);
       p.y_vel = s16(-p.y_vel);
@@ -689,6 +750,15 @@ export class ObjCore {
       o.saved_collision = o.collision_flags; // $25(a1)
       o.collision_flags = 0;
       if (--o.boss_hitcount2 === 0) o.status |= 0x80;
+      // .bossnotdefeated: a gliding Knuckles drops out of the glide
+      if (p.character_id === 2 && p.double_jump_flag === 1) {
+        p.double_jump_flag = 2;
+        p.anim = 0x21;
+        p.status &= ~1;
+        if (p.x_vel >= 0) p.status |= 1;
+        p.y_radius = p.default_y_radius;
+        p.x_radius = p.default_x_radius;
+      }
       return 0;
     }
     return this.touchEnemyNormal(o);
@@ -748,7 +818,11 @@ export class ObjCore {
   // Touch_Special
   touchSpecial(o) {
     const d1 = o.collision_flags & 0x3f;
-    if ([7, 6, 0xa, 0xc, 0x15, 0x16, 0x17, 0x18, 0x21].includes(d1)) o.collision_property = (o.collision_property + 1) & 0xff;
+    if ([7, 6, 0xa, 0xc, 0x15, 0x16, 0x17, 0x18, 0x21].includes(d1)) {
+      // loc_115EC: anything but Player_1 counts twice
+      if (this.player !== this.game.player) o.collision_property = (o.collision_property + 1) & 0xff;
+      o.collision_property = (o.collision_property + 1) & 0xff;
+    }
     return 0;
   }
 
@@ -1010,15 +1084,19 @@ export class ObjCore {
   }
 
   // ------------------------------------------------------------------ solid objects
-  // SolidObjectFull_1P
-  solidObjectFull(o, d1, d2, d3, d4) { return this._solidFull(o, d1, d2, d3, d4, true); }
-  // SolidObjectFull2_1P
-  solidObjectFull2(o, d1, d2, d3, d4) { return this._solidFull(o, d1, d2, d3, d4, false); }
+  // SolidObjectFull: Player_1, then Player_2 if he is on screen (tst.b render_flags(a1))
+  solidObjectFull(o, d1, d2, d3, d4) {
+    return this._both(() => this._solidFull(o, d1, d2, d3, d4, true), (p2) => (p2.render_flags & 0x80) !== 0);
+  }
+  // SolidObjectFull2
+  solidObjectFull2(o, d1, d2, d3, d4) { return this._both(() => this._solidFull(o, d1, d2, d3, d4, false)); }
+  // SolidObjectFull_1P / SolidObjectFull2_1P for player i
+  solidObjectFull_1P(o, d1, d2, d3, d4, i = 0) { return this.asPlayer(i, () => { this.d6 = 0; return this._solidFull(o, d1, d2, d3, d4, true); }); }
+  solidObjectFull2_1P(o, d1, d2, d3, d4, i = 0) { return this.asPlayer(i, () => { this.d6 = 0; return this._solidFull(o, d1, d2, d3, d4, false); }); }
 
   _solidFull(o, d1, d2, d3, d4, needOnScreen) {
     const p = this.player;
-    this.d6 = 0;
-    if (o.status & P1_STANDING) {
+    if (o.status & this.standBit) {
       if (!(p.status & S_INAIR)) {
         const d0 = s16(p.x_pos - o.x_pos + d1);
         if (d0 >= 0 && d0 < d1 * 2) { this.mvSonicOnPtfm(o, d3, d4); return 0; }
@@ -1034,13 +1112,12 @@ export class ObjCore {
     const p = this.player;
     p.status &= ~S_ONOBJ;
     p.status |= S_INAIR;
-    o.status &= ~P1_STANDING;
+    o.status &= ~this.standBit;
   }
 
-  // SolidObject_cont
+  // SolidObject_cont (current player context)
   solidObjectCont(o, d1, d2, d3, d4) {
     const p = this.player;
-    this.d6 = 0;
     const d0 = s16(p.x_pos - o.x_pos + d1);
     if (d0 < 0 || d0 > d1 * 2) return this._solidNone(o);
     let dd4 = s8(p.default_y_radius) + d2;
@@ -1055,7 +1132,7 @@ export class ObjCore {
 
   // loc_1BD8A
   _solidResolve(o, d0, d1, d2, d3, d4) {
-    const p = this.player;
+    const p = this.player, sh = this.touchShift;
     if (p.object_control & 0x80) return this._solidNone(o);
     if (p.routine >= 6) return 0;
     let d5 = d0;
@@ -1075,12 +1152,12 @@ export class ObjCore {
           }
         }
         p.x_pos = s16(p.x_pos - d0);
-        this.d6 |= TOUCH_SIDE;
+        this.d6 |= TOUCH_SIDE << sh;
         if (!(p.status & S_INAIR)) {
-          o.status |= P1_PUSHING;
+          o.status |= this.pushBit;
           p.status |= S_PUSH;
         } else {
-          o.status &= ~P1_PUSHING;
+          o.status &= ~this.pushBit;
           p.status &= ~S_PUSH;
         }
         return 1;
@@ -1101,18 +1178,18 @@ export class ObjCore {
           continue;
         }
         this.killCharacter();
-        this.d6 |= TOUCH_BOTTOM;
+        this.d6 |= TOUCH_BOTTOM << sh;
         return -2;
       } else if (p.y_vel > 0) {
         if (p.status_tertiary & 0x80) p.status_tertiary |= 0x20;
-        this.d6 |= TOUCH_BOTTOM;
+        this.d6 |= TOUCH_BOTTOM << sh;
         return -2;
       }
       // loc_1BE80
       p.y_pos = s16(p.y_pos - d3);
       p.y_vel = 0;
       if (p.status_tertiary & 0x80) p.status_tertiary |= 0x20;
-      this.d6 |= TOUCH_BOTTOM;
+      this.d6 |= TOUCH_BOTTOM << sh;
       return -2;
     }
   }
@@ -1127,16 +1204,16 @@ export class ObjCore {
     p.y_pos = s16(p.y_pos - d3 - 1);
     if (p.y_vel < 0) return 0;
     this.rideObjectSetRide(o);
-    this.d6 |= TOUCH_TOP;
+    this.d6 |= TOUCH_TOP << this.touchShift;
     return -1;
   }
 
   // loc_1BE2E
   _solidNone(o) {
     const p = this.player;
-    if (o.status & P1_PUSHING) {
+    if (o.status & this.pushBit) {
       if (p.anim !== 2) { p.anim = 0; p.prev_anim = 1; } // move.w #1,anim(a1)
-      o.status &= ~P1_PUSHING;
+      o.status &= ~this.pushBit;
       p.status &= ~S_PUSH;
     }
     return 0;
@@ -1154,23 +1231,26 @@ export class ObjCore {
   // RideObject_SetRide
   rideObjectSetRide(o) {
     const p = this.player;
-    if ((p.status & S_ONOBJ) && p.interact && p.interact.status !== undefined) p.interact.status &= ~P1_STANDING;
+    if ((p.status & S_ONOBJ) && p.interact && p.interact.status !== undefined) p.interact.status &= ~this.standBit;
     p.interact = o;
     p.angle = 0;
     p.y_vel = 0;
     p.ground_vel = p.x_vel;
     p.status |= S_ONOBJ;
-    o.status |= P1_STANDING;
+    o.status |= this.standBit;
     if (p.status & S_INAIR) {
       p.status &= ~S_INAIR;
       p._touchFloor(); // Player_TouchFloor
     }
   }
 
+  // SolidObjectTop
+  solidObjectTop(o, d1, d3, d4) { return this._both(() => this._solidTop(o, d1, d3, d4)); }
+  solidObjectTop_1P(o, d1, d3, d4, i = 0) { return this.asPlayer(i, () => this._solidTop(o, d1, d3, d4)); }
   // SolidObjectTop_1P
-  solidObjectTop(o, d1, d3, d4) {
+  _solidTop(o, d1, d3, d4) {
     const p = this.player;
-    if (o.status & P1_STANDING) {
+    if (o.status & this.standBit) {
       if (!(p.status & S_INAIR)) {
         const d0 = s16(p.x_pos - o.x_pos + d1);
         if (d0 >= 0 && d0 < d1 * 2) { this.mvSonicOnPtfm(o, d3, d4); return 0; }
@@ -1200,10 +1280,13 @@ export class ObjCore {
     return -1;
   }
 
+  // SolidObjectTopSloped2
+  solidObjectTopSloped2(o, d1, slope, d4) { return this._both(() => this._solidTopSloped2(o, d1, slope, d4)); }
+  solidObjectTopSloped2_1P(o, d1, slope, d4, i = 0) { return this.asPlayer(i, () => this._solidTopSloped2(o, d1, slope, d4)); }
   // SolidObjectTopSloped2_1P
-  solidObjectTopSloped2(o, d1, slope, d4) {
+  _solidTopSloped2(o, d1, slope, d4) {
     const p = this.player;
-    if (o.status & P1_STANDING) {
+    if (o.status & this.standBit) {
       if (!(p.status & S_INAIR)) {
         const d0 = s16(p.x_pos - o.x_pos + d1);
         if (d0 >= 0 && d0 < d1 * 2) { this.solidObjSloped2(o, d1, d4, slope); return 0; }
@@ -1220,7 +1303,7 @@ export class ObjCore {
     return this._topLand(o, s16(o.y_pos - s8(slope[d0])));
   }
 
-  // SolidObjSloped2
+  // SolidObjSloped2 (current player context)
   solidObjSloped2(o, d1, d2, slope) {
     const p = this.player;
     if (!(p.status & S_ONOBJ)) return;
@@ -1231,16 +1314,17 @@ export class ObjCore {
     p.x_pos = s16(p.x_pos - (d2 - o.x_pos));
   }
 
-  // sub_1BADA (full solid with a height table; used by diagonal springs)
-  solidObjectSloped(o, d1, d2, slope, d4) {
+  // sub_1BAC4 (both players) / sub_1BADA (full solid with a height table; diagonal springs)
+  solidObjectSloped(o, d1, d2, slope, d4) { return this._both(() => this._solidSloped(o, d1, d2, slope, d4)); }
+  solidObjectSloped_1P(o, d1, d2, slope, d4, i = 0) { return this.asPlayer(i, () => { this.d6 = 0; return this._solidSloped(o, d1, d2, slope, d4); }); }
+  _solidSloped(o, d1, d2, slope, d4) {
     const p = this.player;
-    this.d6 = 0;
-    if (o.status & P1_STANDING) {
+    if (o.status & this.standBit) {
       if (!(p.status & S_INAIR)) {
         const d0 = s16(p.x_pos - o.x_pos + d1);
         if (d0 >= 0 && d0 < d1 * 2) {
           this.solidObjSloped2(o, d1, d4, slope);
-          this.d6 |= TOUCH_TOP;
+          this.d6 |= TOUCH_TOP << this.touchShift;
           return 0;
         }
       }

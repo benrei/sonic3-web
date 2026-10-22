@@ -158,13 +158,18 @@ export const LBZ1 = {
     lbz1EventVScroll(s);
     const mask = m.uw(R.Camera_Y_pos_mask);
     for (let i = 0; i < 12; i++) m.setW(HS + 0x102 + i * 4, m.w(HS + 0x100 + i * 4) & mask);
-    if (m.uw(R.Camera_X_pos_copy) >= 0x3b60) lbz1ModEndingLayout(s); // (+ invisible barrier object)
+    // (+ invisible barrier object); S3&K: always for Knuckles, without the barrier
+    if (p.character_id === 2 || m.uw(R.Camera_X_pos_copy) >= 0x3b60) lbz1ModEndingLayout(s);
     lbz1CheckLayoutMod(s, u16(p.x_pos), u16(p.y_pos));
     s.resetTileOffsetPositionActual();
   },
   screenEvent(s) {
     const m = s.m, p = s.game.player;
     m.addW(R.Camera_Y_pos_copy, m.w(R.Screen_shake_offset));
+    // S3&K LBZ1_KnuxLevelSizeAdjust: the top of the screen near the end of Knuckles' route
+    if (p.character_id === 2 && u16(p.x_pos) >= 0x37c0 && u16(p.x_pos) <= 0x3800 && u16(p.y_pos) >= 0x600 && u16(p.y_pos) <= 0x680) {
+      m.setW(R.Camera_min_Y_pos, u16(p.y_pos) >= 0x640 ? 0 : 0x40c);
+    }
     if (m.w(R.Events_fg_4) === 0x55) {
       // the boss (object) asks for its chunk to be swapped in
       m.setW(R.Events_fg_4, 0);

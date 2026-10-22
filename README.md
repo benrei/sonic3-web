@@ -27,8 +27,10 @@ Ingen byggesteg – rene ES-moduler, som også kjører i Node.
 | Enter | start / pause |
 | Esc | sonemeny |
 | M / F | lyd av/på / fullskjerm |
+| hopp i luften (Tails) | fly – trykk gjentatte ganger for å stige |
+| I / J / K / L + Q | kontroller 2: overtar Tails i «Sonic & Tails» (ellers styres han av CPU-en) |
 
-Gamepad og berøringsknapper (mobil) støttes også.
+Gamepad og berøringsknapper (mobil) støttes også (gamepad nr. 2 = kontroller 2).
 
 ## Hvordan ROM-en ble forstått
 
@@ -50,14 +52,20 @@ osv. med samme 8.8 fastpunkt-matematikk. `src/vdp.js` er en liten programvare-VD
 
 ## Status / begrensninger
 
-- Angel Island akt 1 er mest komplett (inkl. parallax-bakgrunn tilpasset `AIZ1_Deform`). De andre sonene kan spilles,
-  men bruker generisk bakgrunnsscrolling og mangler de fleste sonespesifikke objekter.
-- Implementerte objekter: ringer, monitorer, fjærer, pigger, banebyttere (loop-lag), steiner, plattformer, sjekkpunkt,
-  Rhinobot, Bloominator, Monkey Dude. Lianer, bosser, vann, skjold-grafikk, animerte tiles og palettsykling mangler.
-- Musikk (YM2612/PSG) er ikke emulert – lydeffektene er enkle syntetiserte erstatninger.
+- Fungerer med Sonic 3 (2 MB) og Sonic 3 & Knuckles (4 MB lock-on). Alle 12 Sonic 3-akter kan spilles og fullføres
+  (akten slutter ved minibossen / sluttbossen – bosser er ikke portert).
+- Figurer: Sonic, Sonic & Tails (CPU-Tails, kontroller 2 kan ta over), Tails alene (flyr/svømmer) og – med S3&K-ROM –
+  Knuckles (glir, klatrer, egne ruter og startposisjoner fra S3&K-dataene).
+- Portert fra originalen: fysikk for alle tre figurer, skjold/insta-shield, objektsystemet (SolidObject, TouchResponse,
+  ringer, respawn), kamera og bakgrunnsdeformasjon for alle soner, vann (fysikk, luft/drukning, palettsplitt),
+  animerte tiles og palettsykler, banestarter (LBZ1, ICZ1-snowboard), resultatskjerm, tidsgrense, game over.
+- Angel Island har alle badniks og gimmicks. De andre sonene mangler fortsatt de fleste sonespesifikke objekter og badniks.
+- Ikke portert: bosser, spesialetapper, Super/Hyper-former, S&K-sonene og musikk (YM2612/PSG) – lydeffektene er
+  enkle syntetiserte erstatninger.
 
 ## Verktøy
 
 `tools/` inneholder Node-skript brukt under reverse engineering og testing (krever ROM-sti som argument):
 `render-level.mjs` (nivå til PNG), `sheet.mjs` (sprite-ark), `objinfo.mjs` (objekt-mappings/art fra kode),
-`play.mjs` (kjør spillet headless med skriptet input og lagre skjermbilder).
+`play.mjs` (kjør spillet headless med skriptet input og lagre skjermbilder; `CHAR=tails|sonic-tails`),
+`test-tails.mjs` (Tails-testene).

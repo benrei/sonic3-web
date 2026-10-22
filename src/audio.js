@@ -92,6 +92,12 @@ export class Audio {
       case 'airbubble': this.tone(400, 0.12, 'sine', 0.08, 0, 3); break; // sfx_Bubble
       case 'drown': this.tone(600, 0.8, 'sawtooth', 0.06, 0, 0.15); break; // sfx_Drown
       case 'drowning': [262, 277, 294, 311, 330, 349].forEach((f, i) => this.tone(f, 0.18, 'square', 0.04, i * 0.2)); break; // mus_Drowning cue
+      case 'fly': this.tone(180, 0.1, 'triangle', 0.04, 0, 1.3); break; // sfx_Flying
+      case 'grab': this.tone(250, 0.06, 'square', 0.05, 0, 0.6); this.noise(0.05, 0.05); break; // sfx_Grab (Knuckles)
+      case 'glideland': this.noise(0.12, 0.08); this.tone(160, 0.1, 'square', 0.04, 0, 0.5); break; // sfx_GlideLand
+      case 'groundslide': this.noise(0.1, 0.04); break; // sfx_GroundSlide
+      case 'flytired': this.tone(140, 0.12, 'triangle', 0.035, 0, 0.8); break; // sfx_FlyTired
+      case 'grab': this.tone(660, 0.08, 'square', 0.05); this.tone(990, 0.08, 'square', 0.04, 0.05); break; // sfx_Grab
       case 'music-level': break; // Player_ResetAirTimer: resume level music (no music here)
       default: break;
     }

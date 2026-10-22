@@ -187,6 +187,12 @@ const KEYMAP = {
   KeyZ: 'a', KeyX: 'b', KeyC: 'c', Space: 'c', KeyA: 'a', KeyS: 'b', KeyD: 'c', Enter: 'start', Escape: 'back',
 };
 const KEYS = ['up', 'down', 'left', 'right', 'a', 'b', 'c', 'start', 'back'];
+// Second controller (Ctrl_2): takes over the Tails sidekick in "Sonic & Tails" (I/J/K/L + Q,
+// or gamepad #2)
+const KEYMAP2 = { KeyI: 'up', KeyJ: 'left', KeyK: 'down', KeyL: 'right', KeyQ: 'a' };
+const held2 = {};
+const latch2 = {}; // presses shorter than a frame still count
+let prevHeld2 = {};
 const held = {};
 const touchHeld = {};
 const latch = {}; // presses shorter than a frame still count
@@ -201,14 +207,21 @@ addEventListener('keydown', (e) => {
     if (!e.repeat) latch[k] = true;
     held[k] = true;
   }
+  const k2 = KEYMAP2[e.code];
+  if (k2) { e.preventDefault(); if (!e.repeat) latch2[k2] = true; held2[k2] = true; }
   if (e.code === 'KeyM') toggleMute();
   if (e.code === 'KeyF') toggleFullscreen();
 });
-addEventListener('keyup', (e) => { const k = KEYMAP[e.code]; if (k) held[k] = false; });
+addEventListener('keyup', (e) => {
+  const k = KEYMAP[e.code];
+  if (k) held[k] = false;
+  const k2 = KEYMAP2[e.code];
+  if (k2) held2[k2] = false;
+});
 
 // Releasing everything when focus is lost avoids "stuck" keys after alt-tab.
 function releaseAll() {
-  for (const k of KEYS) { held[k] = false; touchHeld[k] = false; }
+  for (const k of KEYS) { held[k] = false; touchHeld[k] = false; held2[k] = false; }
   touchPointers.clear();
 }
 function swallowHeld() { for (const k of KEYS) { prevHeld[k] = true; latch[k] = false; } }
@@ -250,22 +263,27 @@ let padPrev = '';
 function readInput() {
   const cur = {};
   for (const k of KEYS) cur[k] = !!(held[k] || touchHeld[k]);
-  for (const pad of navigator.getGamepads?.() || []) {
-    if (!pad) continue;
+  const cur2 = {};
+  for (const k of KEYS) cur2[k] = !!(held2[k] || latch2[k]);
+  const pads = [...(navigator.getGamepads?.() || [])].filter(Boolean);
+  for (const [i, pad] of pads.entries()) {
     const ax = pad.axes[0] || 0, ay = pad.axes[1] || 0, bt = (i) => !!pad.buttons[i]?.pressed;
     const p = {
       left: ax < -0.4 || bt(14), right: ax > 0.4 || bt(15), up: ay < -0.4 || bt(12), down: ay > 0.4 || bt(13),
       a: bt(2) || bt(3), b: bt(0), c: bt(1), start: bt(9), back: bt(8),
     };
+    if (i === 1) { for (const k in p) cur2[k] ||= p[k]; continue; } // gamepad #2 = Ctrl_2
     const sig = JSON.stringify(p);
     if (sig !== padPrev && Object.values(p).some(Boolean)) lastInputKind = 'gamepad';
     padPrev = sig;
     for (const k in p) cur[k] ||= p[k];
   }
-  const pressed = {};
+  const pressed = {}, pressed2 = {};
   for (const k of KEYS) { pressed[k] = (cur[k] && !prevHeld[k]) || !!latch[k]; latch[k] = false; }
+  for (const k of KEYS) { pressed2[k] = (cur2[k] && !prevHeld2[k]) || !!latch2[k]; latch2[k] = false; }
   prevHeld = cur;
-  return { held: cur, pressed };
+  prevHeld2 = cur2;
+  return { held: cur, pressed, input2: { held: cur2, pressed: pressed2 } };
 }
 
 // ---------------- Sound / fullscreen ----------------
@@ -308,7 +326,7 @@ function tick() {
     dirty = true;
   }
   if (paused) return;
-  game.update(input);
+  game.update(input, input.input2);
   dirty = true;
   if (game.restartRequested) {
     carry = { lives: game.lives, score: game.score, nextExtraLife: game.nextExtraLife };
@@ -360,7 +378,7 @@ function drawOverlay(o) {
     banner(`ACT ${game.zone.act}`, 140, '#ffd200', 16);
     ctx.restore();
   } else if (o.kind === 'clear') {
-    banner('SONIC GOT THROUGH', 64, '#fff', 20);
+    banner(`${game.character === 'tails' ? 'TAILS' : 'SONIC'} GOT THROUGH`, 64, '#fff', 20);
     banner(`ACT ${game.zone.act}`, 86, '#ffd200', 18);
     const r = o.results;
     if (r) {

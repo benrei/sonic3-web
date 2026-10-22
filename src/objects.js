@@ -1,7 +1,7 @@
 // Level objects: ports of the original object code (s3.asm) on top of objcore.js.
 // Labels in comments are the original ones; loc_xxxxx labels are ROM addresses.
 // Art, mappings, animation scripts and data tables are read from the ROM.
-import { Obj, Explosion, Projectile, P1_STANDING, P1_PUSHING, TOUCH_SIDE, TOUCH_BOTTOM } from './objcore.js';
+import { Obj, Explosion, Projectile, P1_STANDING, P1_PUSHING, P2_STANDING, P2_PUSHING, TOUCH_SIDE, TOUCH_BOTTOM } from './objcore.js';
 import { AIZ_TYPES } from './objects-aiz.js';
 import { Bubbler } from './water.js';
 
@@ -75,13 +75,12 @@ function springFlipAndPath(p, d0, speed, remainingIfNotBit1, remainingIfBit1) {
 }
 
 // sub_228EC: hurt the player (spikes, Eggman monitor) after undoing his last y move
-function hurtFromSpikes(game, srcX) {
-  const p = game.player;
+function hurtFromSpikes(game, srcX, p = game.player) {
   if (p.status_secondary & SS_INVINCIBLE) return;
   if (p.invulnerable_time) return;
   if (p.routine >= 4) return;
   p._y = (p._y - (p.y_vel << 8)) | 0;
-  game.core.hurtCharacter(srcX);
+  p.hurt(srcX); // HurtCharacter (a0 = that player)
 }
 
 // =============================================================================
@@ -94,42 +93,42 @@ class PathSwap extends Obj {
     this.width_pixels = 0x40;
     this.height_pixels = 0x40;
     this.priority = 0x280;
-    const s = this.subtype, p = game.player;
+    const s = this.subtype;
     this.vertical = (s & 4) !== 0; // horizontal line: player crosses it moving up/down
     this.mapping_frame = this.vertical ? s & 7 : s & 3;
     this.size = [0x20, 0x40, 0x80, 0x100][s & 3]; // word_1B048 ($32)
-    // $34: which side Player 1 is on
-    if (this.vertical) this.side = u16(this.y_pos) >= u16(p.y_pos) ? 0 : 1;
-    else this.side = u16(this.x_pos) >= u16(p.x_pos) ? 0 : 1;
+    // $34 / $35: which side Player 1 / Player 2 is on (an empty Player_2 slot is at 0, 0)
+    const side = (p) => (this.vertical ? u16(this.y_pos) >= u16(p?.y_pos ?? 0) : u16(this.x_pos) >= u16(p?.x_pos ?? 0)) ? 0 : 1;
+    this.sides = [side(game.player), side(game.sidekick)];
   }
   update() {
-    // loc_1B09E / loc_1B208
-    this.vertical ? this.sub_1B25A() : this.sub_1B0F0();
+    // loc_1B09E / loc_1B208: Player_1, then Player_2
+    this.core.players().forEach((p, i) => (this.vertical ? this.sub_1B25A(p, i) : this.sub_1B0F0(p, i)));
     this.deleteIfNotInRange();
   }
   // sub_1B0F0 (vertical line, crossed horizontally)
-  sub_1B0F0() {
-    const p = this.game.player, d1 = this.x_pos;
-    if (!this.side) {
+  sub_1B0F0(p, i) {
+    const d1 = this.x_pos;
+    if (!this.sides[i]) {
       if (u16(d1) > u16(p.x_pos)) return;
-      this.side = 1;
+      this.sides[i] = 1;
       this.apply(p, p.y_pos, this.y_pos, p.x_pos - d1, 8, 0x20);
     } else {
       if (u16(d1) <= u16(p.x_pos)) return;
-      this.side = 0;
+      this.sides[i] = 0;
       this.apply(p, p.y_pos, this.y_pos, p.x_pos - d1, 0x10, 0x40);
     }
   }
   // sub_1B25A (horizontal line, crossed vertically)
-  sub_1B25A() {
-    const p = this.game.player, d1 = this.y_pos;
-    if (!this.side) {
+  sub_1B25A(p, i) {
+    const d1 = this.y_pos;
+    if (!this.sides[i]) {
       if (u16(d1) > u16(p.y_pos)) return;
-      this.side = 1;
+      this.sides[i] = 1;
       this.apply(p, p.x_pos, this.x_pos, p.y_pos - d1, 8, 0x20);
     } else {
       if (u16(d1) <= u16(p.y_pos)) return;
-      this.side = 0;
+      this.sides[i] = 0;
       this.apply(p, p.x_pos, this.x_pos, p.y_pos - d1, 0x10, 0x40);
     }
   }
@@ -192,20 +191,24 @@ class Monitor extends Obj {
         }
       }
     }
-    // loc_1B4C8: SolidObject_Monitor_Sonic
+    // loc_1B4C8: SolidObject_Monitor_Sonic (Player_1), SolidObject_Monitor_Tails (Player_2:
+    // always solid outside competition mode, only Player_1 breaks monitors)
     const d1 = 0x19, d2 = 0x10, d3 = 0x11, d4 = this.x_pos;
-    if (this.status & P1_STANDING) {
-      // Monitor_ChkOverEdge
-      const d0 = s16(p.x_pos - this.x_pos + d1);
-      if (!(p.status & S_INAIR) && d0 >= 0 && d0 < d1 * 2) core.mvSonicOnPtfm(this, d3, d4);
-      else {
-        p.status &= ~S_ONOBJ;
-        p.status |= S_INAIR;
-        this.status &= ~P1_STANDING;
+    core.players().forEach((pl, i) => core.asPlayer(i, () => {
+      const stand = core.standBit;
+      if (this.status & stand) {
+        // Monitor_ChkOverEdge
+        const d0 = s16(pl.x_pos - this.x_pos + d1);
+        if (!(pl.status & S_INAIR) && d0 >= 0 && d0 < d1 * 2) core.mvSonicOnPtfm(this, d3, d4);
+        else {
+          pl.status &= ~S_ONOBJ;
+          pl.status |= S_INAIR;
+          this.status &= ~stand;
+        }
+      } else if (i === 1 || (pl.anim !== 2 && !knuxAttacking(pl))) {
+        core.solidObjectCont(this, d1, d2, d3, d4);
       }
-    } else if (p.anim !== 2) {
-      core.solidObjectCont(this, d1, d2, d3, d4);
-    }
+    }));
     this.addTouch();
     // Obj_MonitorAnimate
     this.animateSprite(ANI.Monitor);
@@ -213,10 +216,14 @@ class Monitor extends Obj {
   }
   // Obj_MonitorBreak
   monitorBreak() {
-    const g = this.game, p = g.player;
+    const g = this.game, p = g.player, p2 = g.sidekick;
     if (this.status & (P1_STANDING | P1_PUSHING)) {
       p.status &= 0xd7;
       p.status |= S_INAIR;
+    }
+    if (p2 && (this.status & (P2_STANDING | P2_PUSHING))) {
+      p2.status &= 0xd7;
+      p2.status |= S_INAIR;
     }
     // Obj_MonitorSpawnIcon
     this.status = 0;
@@ -228,6 +235,12 @@ class Monitor extends Obj {
     this.anim = 0xa;
     this.display();
   }
+}
+
+// SolidObject_Monitor_SonicKnux: a gliding (double_jump_flag 1) or sliding (3) Knuckles
+// passes into monitors (and breaks them in Touch_Monitor)
+function knuxAttacking(pl) {
+  return pl.character_id === 2 && (pl.double_jump_flag === 1 || pl.double_jump_flag === 3);
 }
 
 // Obj_MonitorContents: the icon rises, then the power-up is given
@@ -310,44 +323,53 @@ class Spring extends Obj {
     this.power = this.subtype & 2 ? -0xa00 : -0x1000; // $30
     if (this.subtype & 2) this.mappings = game.maps(MAP.Spring2);
   }
+  // Each spring runs the _1P solid routine for Player_1 (p1_standing_bit) and then for
+  // Player_2 (p2_standing_bit) and launches whoever is on it.
   update() {
-    const core = this.core;
+    const core = this.core, players = core.players();
     switch (this.kind) {
       case 0: // Obj_Spring_Up
-        core.solidObjectFull2(this, 0x1b, 8, 0x10, this.x_pos);
-        if (this.status & P1_STANDING) this.launchUp();
+        players.forEach((p, i) => {
+          core.solidObjectFull2_1P(this, 0x1b, 8, 0x10, this.x_pos, i);
+          if (this.status & (i ? P2_STANDING : P1_STANDING)) this.launchUp(p);
+        });
         this.animateSprite(ANI.Spring);
         return this.spriteOnScreenTest();
-      case 1: { // Obj_Spring_Horizontal
-        const p = this.game.player;
-        core.solidObjectFull2(this, 0x13, 0xe, 0xf, this.x_pos);
-        if (core.d6 & TOUCH_SIDE) {
-          let d1 = this.status;
-          if (u16(this.x_pos) >= u16(p.x_pos)) d1 ^= 1;
-          if (!(d1 & 1)) this.launchHorizontal(8);
-        }
+      case 1: // Obj_Spring_Horizontal
+        players.forEach((p, i) => {
+          core.solidObjectFull2_1P(this, 0x13, 0xe, 0xf, this.x_pos, i);
+          if (core.d6 & (TOUCH_SIDE << i)) {
+            let d1 = this.status;
+            if (u16(this.x_pos) >= u16(p.x_pos)) d1 ^= 1;
+            if (!(d1 & 1)) this.launchHorizontal(8, p);
+          }
+        });
         this.sub_2190C();
         this.animateSprite(ANI.Spring);
         return this.spriteOnScreenTest(this.homeX);
-      }
       case 2: // Obj_Spring_Down
-        if (core.solidObjectFull2(this, 0x1b, 8, 9, this.x_pos) === -2) this.launchDown();
+        players.forEach((p, i) => {
+          if (core.solidObjectFull2_1P(this, 0x1b, 8, 9, this.x_pos, i) === -2) this.launchDown(p);
+        });
         this.animateSprite(ANI.Spring);
         return this.spriteOnScreenTest();
       case 3: // Obj_Spring_UpDiag
-        core.solidObjectSloped(this, 0x1b, 0x10, this.slope, this.x_pos);
-        if (this.status & P1_STANDING) this.sub_21B74();
+        players.forEach((p, i) => {
+          core.solidObjectSloped_1P(this, 0x1b, 0x10, this.slope, this.x_pos, i);
+          if (this.status & (i ? P2_STANDING : P1_STANDING)) this.sub_21B74(p);
+        });
         this.animateSprite(ANI.Spring);
         return this.spriteOnScreenTest(this.homeX);
       case 4: // Obj_Spring_DownDiag
-        if (core.solidObjectSloped(this, 0x1b, 0x10, this.slope, this.x_pos) === -2) this.launchDownDiag();
+        players.forEach((p, i) => {
+          if (core.solidObjectSloped_1P(this, 0x1b, 0x10, this.slope, this.x_pos, i) === -2) this.launchDownDiag(p);
+        });
         this.animateSprite(ANI.Spring);
         return this.spriteOnScreenTest(this.homeX);
     }
   }
   // sub_2164A
-  launchUp() {
-    const p = this.game.player;
+  launchUp(p = this.game.player) {
     this.anim = 1; this.prev_anim = 0;
     p.y_pos = s16(p.y_pos + 8);
     p.y_vel = this.power;
@@ -363,8 +385,7 @@ class Spring extends Obj {
     this.game.sfx('spring');
   }
   // sub_21836 (d = 8; the 2P variant sub_21806 uses 4)
-  launchHorizontal(d) {
-    const p = this.game.player;
+  launchHorizontal(d, p = this.game.player) {
     this.anim = 3; this.prev_anim = 0;
     p.x_vel = this.power;
     p.x_pos = s16(p.x_pos + d);
@@ -381,28 +402,28 @@ class Spring extends Obj {
     const d0 = this.subtype;
     if (d0 & 0x80) p.y_vel = 0;
     springFlipAndPath(p, d0, 8, 3, 1);
-    this.status &= ~P1_PUSHING;
+    this.status &= ~(P1_PUSHING | P2_PUSHING);
     p.status &= ~S_PUSH;
     this.game.sfx('spring');
   }
-  // sub_2190C: launch a player standing in front of the spring's face
+  // sub_2190C: launch a player standing in front of the spring's face (Player_1, Player_2)
   sub_2190C() {
     if (this.anim === 3) return;
-    const p = this.game.player;
     let d0 = this.x_pos, d1 = d0 + 0x28;
     if (this.status & 1) { d1 = d0; d0 -= 0x28; }
     const d2 = this.y_pos - 0x18, d3 = this.y_pos + 0x18;
-    if (p.status & S_INAIR) return;
-    let d4 = p.ground_vel;
-    if (this.status & 1) d4 = s16(-d4);
-    if (d4 < 0) return;
-    if (u16(p.x_pos) < u16(d0) || u16(p.x_pos) >= u16(d1)) return;
-    if (u16(p.y_pos) < u16(d2) || u16(p.y_pos) >= u16(d3)) return;
-    this.launchHorizontal(8);
+    for (const p of this.core.players()) {
+      if (p.status & S_INAIR) continue;
+      let d4 = p.ground_vel;
+      if (this.status & 1) d4 = s16(-d4);
+      if (d4 < 0) continue;
+      if (u16(p.x_pos) < u16(d0) || u16(p.x_pos) >= u16(d1)) continue;
+      if (u16(p.y_pos) < u16(d2) || u16(p.y_pos) >= u16(d3)) continue;
+      this.launchHorizontal(8, p);
+    }
   }
   // sub_21A6A
-  launchDown() {
-    const p = this.game.player;
+  launchDown(p = this.game.player) {
     p.y_pos = s16(p.y_pos - 8);
     this.anim = 1; this.prev_anim = 0;
     p.y_vel = s16(-this.power);
@@ -417,8 +438,7 @@ class Spring extends Obj {
     this.game.sfx('spring');
   }
   // sub_21B74
-  sub_21B74() {
-    const p = this.game.player;
+  sub_21B74(p = this.game.player) {
     if (!(this.status & 1)) { if (!(u16(this.x_pos - 4) < u16(p.x_pos))) return; }
     else if (!(u16(this.x_pos + 4) >= u16(p.x_pos))) return;
     // loc_21B98
@@ -442,8 +462,7 @@ class Spring extends Obj {
     this.game.sfx('spring');
   }
   // sub_21CB2
-  launchDownDiag() {
-    const p = this.game.player;
+  launchDownDiag(p = this.game.player) {
     this.anim = 5; this.prev_anim = 0;
     p.y_vel = s16(-this.power);
     p.x_vel = this.power;
@@ -491,14 +510,17 @@ class Spikes extends Obj {
     const core = this.core, g = this.game;
     this.sub_22922();
     core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
-    if (this.mode === 0) {
-      if (this.status & P1_STANDING) hurtFromSpikes(g, this.x_pos);
-    } else if (this.mode === 1) {
-      if (core.d6 & TOUCH_SIDE) {
-        hurtFromSpikes(g, this.x_pos);
-        this.status &= ~P1_PUSHING;
-      }
-    } else if (core.d6 & TOUCH_BOTTOM) hurtFromSpikes(g, this.x_pos);
+    const d6 = core.d6;
+    core.players().forEach((p, i) => {
+      if (this.mode === 0) { // loc_226FC
+        if (this.status & (i ? P2_STANDING : P1_STANDING)) hurtFromSpikes(g, this.x_pos, p);
+      } else if (this.mode === 1) { // loc_2274E
+        if (d6 & (TOUCH_SIDE << i)) {
+          hurtFromSpikes(g, this.x_pos, p);
+          this.status &= ~(i ? P2_PUSHING : P1_PUSHING);
+        }
+      } else if (d6 & (TOUCH_BOTTOM << i)) hurtFromSpikes(g, this.x_pos, p); // loc_227AA
+    });
     this.spriteOnScreenTest(this.homeX);
   }
   // sub_22922: moving spikes (subtype 1 = vertical, 2 = horizontal)
@@ -562,7 +584,10 @@ class Rock extends Obj {
     this.pushLeft = 0x40; // child_dx ($42 word)
     this.pushTimer = 0; // $40
     this.sideMode = (this.subtype & 4) !== 0; // loc_1D8E0
-    if (!this.sideMode) {
+    // S3&K loc_1FA8C: subtype low nibble $F = breaks when Knuckles stands on it (loc_20002)
+    this.knuxStand = (this.subtype & 0xf) === 0xf;
+    if (this.knuxStand) this.sideMode = false;
+    else if (!this.sideMode) {
       // loc_1D6EA: restore how far the rock was pushed
       const d0 = this.respawnByte & 0x7f;
       if (d0) {
@@ -573,78 +598,153 @@ class Rock extends Obj {
     }
   }
   update() {
+    if (this.knuxStand) return this.knuxStandUpdate();
     return this.sideMode ? this.sideUpdate() : this.topUpdate();
+  }
+  // S3&K loc_20002: only Knuckles (character_id 2) standing on it breaks it; he is bounced
+  // up rolling (sub_20056)
+  knuxStandUpdate() {
+    const core = this.core, p1 = this.game.player, p2 = this.game.sidekick;
+    const chain = core.chainBonus; // $38
+    core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
+    if (!(this.status & P1_STANDING) || p1.character_id !== 2) return this.spriteOnScreenTest();
+    this.sub_1D7CE(p1);
+    if (p2 && (this.status & P2_STANDING)) this.sub_1D7CE(p2);
+    // loc_20088
+    core.chainBonus = chain;
+    this.status &= 0xe7;
+    const f = this.mapping_frame;
+    return this.smash(f * 2, TBL.RockDebrisVel + this.game.rom.u16(TBL.RockDebrisVel + f * 2));
   }
   // loc_1D712
   topUpdate() {
-    const core = this.core, p = this.game.player;
+    const core = this.core, g = this.game, p1 = g.player, p2 = g.sidekick;
     const chain = core.chainBonus; // $38
-    const savedAnim = p.anim; // $32
-    const savedStatus = p.status; // $3A
+    const anim = [p1.anim, p2?.anim]; // $32 / $33
+    const savedStatus = [p1.status, p2?.status ?? 0]; // $3A / $3B
     core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
     if (this.subtype & 2) this.sub_1DAD2(savedStatus);
-    if ((this.subtype & 1) && (this.status & P1_STANDING) && savedAnim === 2) {
-      // loc_1D7B0 -> sub_1D7CE: bounce the player up and smash
-      p.status |= S_ROLL;
-      p.y_radius = 0xe;
-      p.x_radius = 7;
-      p.anim = 2;
-      p.y_vel = -0x300;
-      p.status |= S_INAIR;
-      p.status &= ~S_ONOBJ;
-      p.routine = 2;
-      // loc_1D818
-      core.chainBonus = chain;
-      this.status &= 0xe7;
-      const f = this.mapping_frame;
-      return this.smash(f * 2, TBL.RockDebrisVel + this.game.rom.u16(TBL.RockDebrisVel + f * 2));
+    const d0 = this.status & 0x18; // standing_mask
+    if (!(this.subtype & 1) || !d0) return this.spriteOnScreenTest(this.homeX); // loc_1D76C
+    // loc_1D782: smashed by a player landing on it rolling (sub_1D7CE bounces him up)
+    if (d0 === 0x18) {
+      if (anim[0] !== 2 && anim[1] !== 2) return this.spriteOnScreenTest(this.homeX);
+      this.sub_1D7C8(p1, anim[0]);
+      this.sub_1D7C8(p2, anim[1]);
+    } else if (d0 & P1_STANDING) {
+      if (anim[0] !== 2) return this.spriteOnScreenTest(this.homeX);
+      this.sub_1D7CE(p1);
+    } else {
+      if (anim[1] !== 2) return this.spriteOnScreenTest(this.homeX); // loc_1D800
+      this.sub_1D7CE(p2);
     }
-    this.spriteOnScreenTest(this.homeX);
+    // loc_1D818
+    core.chainBonus = chain;
+    this.status &= 0xe7;
+    const f = this.mapping_frame;
+    return this.smash(f * 2, TBL.RockDebrisVel + this.game.rom.u16(TBL.RockDebrisVel + f * 2));
   }
-  // loc_1D8E0: breakable by rolling into its side
+  // sub_1D7C8 / sub_1D7CE
+  sub_1D7C8(p, anim) {
+    if (anim === 2) return this.sub_1D7CE(p);
+    p.status |= S_INAIR; // loc_1D7EC
+    p.status &= ~S_ONOBJ;
+    p.routine = 2;
+  }
+  sub_1D7CE(p) {
+    p.status |= S_ROLL;
+    p.y_radius = 0xe;
+    p.x_radius = 7;
+    p.anim = 2;
+    p.y_vel = -0x300;
+    p.status |= S_INAIR;
+    p.status &= ~S_ONOBJ;
+    p.routine = 2;
+  }
+  // loc_1D8E0: breakable by rolling into its side (Knuckles just has to push)
   sideUpdate() {
-    const core = this.core, p = this.game.player;
-    const savedXv = p.x_vel; // $30
+    const core = this.core, g = this.game, p1 = g.player, p2 = g.sidekick;
+    const xv1 = p1.x_vel, xv2 = p2?.x_vel ?? 0; // $30 / $36
     core.solidObjectFull(this, this.width_pixels + 0xb, this.height_pixels, this.height_pixels + 1, this.x_pos);
-    if ((core.d6 & TOUCH_SIDE) && !(this.subtype & 0x80)) {
-      const fire = (p.status_secondary & SS_FIRE) !== 0;
-      if ((fire || (this.status & P1_PUSHING)) && p.anim === 2 && Math.abs(savedXv) >= 0x480) {
-        // loc_1D97A -> sub_1DA08
-        this.status &= ~P1_PUSHING;
-        // sub_1DAA8
-        if (this.status & P1_STANDING) {
-          this.status &= ~P1_STANDING;
-          p.status |= S_INAIR;
-          p.status &= ~S_ONOBJ;
+    const d6 = core.d6 & 3;
+    if (d6) {
+      const fast = (v) => u16(Math.abs(v)) >= 0x480;
+      if (d6 & 1) {
+        // loc_1D926: Player_1
+        let brk;
+        if (this.subtype & 0x80) brk = p1.character_id === 2;
+        else brk = p1.character_id === 2 || (((p1.status_secondary & SS_FIRE) || (this.status & P1_PUSHING)) && p1.anim === 2 && fast(xv1));
+        if (brk) {
+          // loc_1D97A
+          this.status &= ~P1_PUSHING;
+          const p2Pushing = (this.status & P2_PUSHING) !== 0;
+          this.sub_1DA08(p1, xv1);
+          if (p2Pushing && p2 && (p2.character_id === 2 || p2.anim === 2)) {
+            p2.x_vel = xv2;
+            p2.ground_vel = p2.x_vel;
+            p2.status &= ~S_PUSH;
+          }
+          return;
         }
-        p.x_vel = savedXv;
-        p.x_pos = s16(p.x_pos + 4);
-        let a4 = TBL.RockDebrisSideL;
-        if (u16(this.x_pos) >= u16(p.x_pos)) {
-          p.x_pos = s16(p.x_pos - 8);
-          a4 = TBL.RockDebrisSideR;
+      }
+      // loc_1D9BE: Player_2
+      if (p2 && (this.status & P2_PUSHING)) {
+        let brk;
+        if (this.subtype & 0x80) brk = p2.character_id === 2;
+        else brk = p2.character_id === 2 || (p2.anim === 2 && fast(xv2));
+        if (brk) {
+          this.status &= ~P2_PUSHING; // loc_1DA02
+          return this.sub_1DA08(p2, xv2);
         }
-        p.ground_vel = p.x_vel;
-        p.status &= ~S_PUSH;
-        return this.smash(this.mapping_frame * 2, a4);
       }
     }
-    this.spriteOnScreenTest(this.homeX);
+    this.spriteOnScreenTest(this.homeX); // loc_1D910
+  }
+  // sub_1DA08 (+ sub_1DAA8: whoever stands on it falls)
+  sub_1DA08(p, xv) {
+    this.core.players().forEach((pl, i) => {
+      const bit = i ? P2_STANDING : P1_STANDING;
+      if (!(this.status & bit)) return;
+      this.status &= ~bit;
+      pl.status |= S_INAIR;
+      pl.status &= ~S_ONOBJ;
+    });
+    p.x_vel = xv;
+    p.x_pos = s16(p.x_pos + 4);
+    let a4 = TBL.RockDebrisSideL;
+    if (u16(this.x_pos) >= u16(p.x_pos)) {
+      p.x_pos = s16(p.x_pos - 8);
+      a4 = TBL.RockDebrisSideR;
+    }
+    p.ground_vel = p.x_vel;
+    p.status &= ~S_PUSH;
+    // S3&K sub_1FE34: a gliding Knuckles drops out of the glide
+    if (p.character_id === 2 && p.double_jump_flag === 1) {
+      p.double_jump_flag = 2;
+      p.anim = 0x21;
+      p.status &= ~1;
+      if (p.x_vel < 0) p.status |= 1;
+    }
+    return this.smash(this.mapping_frame * 2, a4);
   }
   // sub_1DAD2 / sub_1DAFC: pushable rock (moves left one pixel every 17 frames)
   sub_1DAD2(savedStatus) {
-    const p = this.game.player;
-    if (!(this.status & P1_PUSHING)) return;
-    if (u16(this.x_pos) >= u16(p.x_pos)) return;
-    if (!(savedStatus & S_PUSH)) return;
-    if (--this.pushTimer >= 0) return;
-    this.pushTimer = 0x10;
-    if (this.pushLeft === 0) return;
-    this.pushLeft--;
-    this.x_pos--;
-    p.x_pos--;
-    this.y_pos = s16(this.y_pos + this.objCheckFloorDist());
-    this.respawnByte = ((0x40 - this.pushLeft) & 0x7f) | 0x80;
+    const d3 = this.status & 0x60; // pushing_mask
+    if (!d3) return;
+    const d2 = this.x_pos;
+    this.core.players().forEach((p, i) => {
+      if (!(d3 & (i ? P2_PUSHING : P1_PUSHING))) return;
+      if (u16(d2) >= u16(p.x_pos)) return;
+      if (!(savedStatus[i] & S_PUSH)) return;
+      if (--this.pushTimer >= 0) return;
+      this.pushTimer = 0x10;
+      if (this.pushLeft === 0) return;
+      this.pushLeft--;
+      this.x_pos--;
+      p.x_pos--;
+      this.y_pos = s16(this.y_pos + this.objCheckFloorDist());
+      this.respawnByte = ((0x40 - this.pushLeft) & 0x7f) | 0x80;
+    });
   }
   // sub_1DB60: break into debris (this object becomes the first fragment)
   smash(d0, a4) {
@@ -913,14 +1013,15 @@ class CollapseFragment extends Obj {
     this.core.solidObjectTopSloped2(this, this.width_pixels, this.slope, this.x_pos);
     this.spriteOnScreenTest();
     if (--this.timer38 === 0) {
-      // sub_1DF18
-      const p = this.game.player;
-      if (this.status & P1_STANDING) {
-        this.status &= ~P1_STANDING;
+      // sub_1DF18 for Player_1 and Player_2
+      this.core.players().forEach((p, i) => {
+        const bit = i ? P2_STANDING : P1_STANDING;
+        if (!(this.status & bit)) return;
+        this.status &= ~bit;
         p.status &= ~(S_ONOBJ | S_PUSH);
         p.status |= S_INAIR;
         p.prev_anim = 1;
-      }
+      });
     }
   }
 }

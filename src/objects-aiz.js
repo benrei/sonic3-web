@@ -13,7 +13,7 @@
 // boss and cutscene objects, which aren't ported (the flags live in core.aiz); vines treat
 // the player as always on screen; AIZ1 hollow tree: the chunk swaps of AIZ1_ScreenEvent
 // are ported (zones/aiz.js) but not its gradual AIZ_TreeReveal plane-A tile drawing.
-import { Obj, P1_STANDING, P1_PUSHING, TOUCH_SIDE } from './objcore.js';
+import { Obj, P1_STANDING, P1_PUSHING, P2_STANDING, P2_PUSHING, STANDING_MASK, TOUCH_SIDE } from './objcore.js';
 import { R } from './ram.js';
 import { createObject } from './objects.js';
 
@@ -269,16 +269,22 @@ class FwObj extends Obj {
     if (a1.render_flags & 2) { d2 = -d2; this.render_flags |= 2; }
     this.y_pos = s16(a1.y_pos + d2);
   }
-  // Find_SonicTails (Player 1 only): d0 = 2 if the player is right of the object,
-  // d1 = 2 if below, d2 = |dx|, d3 = |dy|
+  // Find_SonicTails: the player nearer in x (Player_1 unless Player_2 is closer; an empty
+  // Player_2 slot sits at x 0): d0 = 2 if he is right of the object, d1 = 2 if below,
+  // d2 = |dx|, d3 = |dy|
   findSonic() {
-    const p = this.game.player;
+    let p = this.game.player;
     let d0 = 0, d1 = 0;
     let d2 = s16(this.x_pos - p.x_pos);
     if (d2 < 0) { d2 = -d2; d0 = 2; }
-    let d3 = s16(this.y_pos - p.y_pos);
+    const p2 = this.game.sidekick;
+    let d3 = s16(this.x_pos - (p2 ? p2.x_pos : 0));
     if (d3 < 0) { d3 = -d3; d1 = 2; }
-    return { d0, d1, d2: u16(d2), d3: u16(d3) };
+    if (u16(d2) > u16(d3)) { p = p2 ?? p; d0 = d1; d2 = d3; }
+    d1 = 0;
+    d3 = s16(this.y_pos - p.y_pos);
+    if (d3 < 0) { d3 = -d3; d1 = 2; }
+    return { d0, d1, d2: u16(d2), d3: u16(d3), player: p };
   }
   // Go_Delete_Sprite: deleted next frame, children see status bit 7
   goDelete() { this.status |= 0x80; this.pendingDelete = true; }
@@ -1076,19 +1082,23 @@ class AutoSpin extends Obj {
     this.priority = 0x280;
     const d0 = this.subtype;
     this.horizontal = (d0 & 4) !== 0; // loc_1C5FA: line crossed vertically
-    if (this.horizontal) {
-      this.mapping_frame = d0 & 7;
-      this.size = AUTOSPIN_SIZES[d0 & 3];
-      this.side = u16(this.y_pos) >= u16(p.y_pos) ? 0 : 1;
-    } else {
-      this.mapping_frame = d0 & 3;
-      this.size = AUTOSPIN_SIZES[d0 & 3];
-      this.side = u16(this.x_pos) >= u16(p.x_pos) ? 0 : 1;
-    }
+    this.mapping_frame = this.horizontal ? d0 & 7 : d0 & 3;
+    this.size = AUTOSPIN_SIZES[d0 & 3];
+    // $34 / $35: side of Player_1 / Player_2 (an empty Player_2 slot is at 0, 0)
+    const side = (q) => (this.horizontal ? u16(this.y_pos) >= u16(q?.y_pos ?? 0) : u16(this.x_pos) >= u16(q?.x_pos ?? 0)) ? 0 : 1;
+    this.sides = [side(p), side(game.sidekick)];
   }
+  // the sidekick's side flag is the second byte ($35); Player_2 is skipped while Tails flies in
+  get side() { return this.sides[this.pi]; }
+  set side(v) { this.sides[this.pi] = v; }
   update() {
-    const p = this.game.player;
-    if (this.horizontal) this.sub_1C61E(p); else this.sub_1C518(p);
+    const g = this.game;
+    this.pi = 0;
+    if (this.horizontal) this.sub_1C61E(g.player); else this.sub_1C518(g.player);
+    if (g.sidekick && g.sidekick.cpuRoutine !== 4) {
+      this.pi = 1;
+      if (this.horizontal) this.sub_1C61E(g.sidekick); else this.sub_1C518(g.sidekick);
+    }
     this.deleteIfNotInRange();
   }
   inRange(v, c) { return u16(v) >= u16(c - this.size) && u16(v) < u16(c + this.size); }
@@ -1156,7 +1166,7 @@ class AutoSpin extends Obj {
 // Obj_TwistedRamp: launches the player into a corkscrew flip when run over fast enough
 class TwistedRamp extends Obj {
   update() {
-    this.sub_23CA2(this.game.player);
+    for (const p of this.core.players()) this.sub_23CA2(p);
     if (this.outOfRange()) this.unload();
   }
   sub_23CA2(p) {
@@ -1250,7 +1260,8 @@ class BreakableWall extends Obj {
       if ((this.subtype & 0x80) && levelTrigger(g, 0)) return this.delete();
     }
     // loc_1F844
-    const savedXv = p.x_vel; // $30
+    const p2 = g.sidekick;
+    const savedXv = p.x_vel, savedXv2 = p2?.x_vel ?? 0; // $30 / $32
     const h = this.height_pixels;
     core.solidObjectFull(this, this.width_pixels + 0xb, h, h + 1, this.x_pos);
     if (this.subtype & 0x80) {
@@ -1258,27 +1269,53 @@ class BreakableWall extends Obj {
       return this.spriteOnScreenTest();
     }
     const d6 = core.d6 & 3;
+    const fast = (v) => u16(Math.abs(v)) >= 0x480;
     if (d6 & TOUCH_SIDE) {
+      // loc_1F88E: Player_1 (Knuckles breaks it by just touching it)
       const fire = (p.status_secondary & SS_FIRE) !== 0;
-      if ((fire || (this.status & P1_PUSHING)) && p.anim === 2 && Math.abs(savedXv) >= 0x480) {
+      if (p.character_id === 2 || ((fire || (this.status & P1_PUSHING)) && p.anim === 2 && fast(savedXv))) {
         // loc_1F8D0 -> sub_1F936
         this.status &= ~P1_PUSHING;
-        p.x_vel = savedXv;
-        p.x_pos = s16(p.x_pos + 4);
-        let a4 = this.t34;
-        if (!(u16(this.x_pos) < u16(p.x_pos))) {
-          p.x_pos = s16(p.x_pos - 8);
-          a4 = this.t38;
+        if (p2 && (this.status & P2_PUSHING) && p2.anim === 2) {
+          p2.x_vel = savedXv2;
+          p2.ground_vel = p2.x_vel;
+          this.status &= ~P2_PUSHING;
+          p2.status &= ~S_PUSH;
         }
-        p.ground_vel = p.x_vel;
-        p.status &= ~S_PUSH;
-        this.mapping_frame++;
-        const f = breakObjectToPieces(this, a4, 0x70);
-        f?.update(); // loc_1F96E runs right away
-        return;
+        return this.sub_1F936(p, savedXv);
       }
     }
+    // loc_1F906: Player_2
+    if (d6 && p2 && (this.status & P2_PUSHING) && p2.anim === 2 && fast(savedXv2)) {
+      this.status &= ~P2_PUSHING;
+      return this.sub_1F936(p2, savedXv2);
+    }
     this.spriteOnScreenTest();
+  }
+  // sub_1F936
+  sub_1F936(p, xv) {
+    p.x_vel = xv;
+    p.x_pos = s16(p.x_pos + 4);
+    let a4 = this.t34;
+    if (!(u16(this.x_pos) < u16(p.x_pos))) {
+      p.x_pos = s16(p.x_pos - 8);
+      a4 = this.t38;
+    }
+    p.ground_vel = p.x_vel;
+    p.status &= ~S_PUSH;
+    // S3&K sub_218CE (the Knuckles-only walls: HCZ/CNZ frame 2, MGZ subtype bit 4, LBZ):
+    // a gliding Knuckles drops out of the glide
+    const zone = this.game.zone.id >> 8, fr = this.subtype & 0xf;
+    const knuxOnly = ((zone === 1 || zone === 3) && fr === 2) || (zone === 2 && (this.subtype & 0x10)) || zone === 6;
+    if (knuxOnly && p.character_id === 2 && p.double_jump_flag === 1) {
+      p.double_jump_flag = 2;
+      p.anim = 0x21;
+      p.status &= ~1;
+      if (p.x_vel < 0) p.status |= 1;
+    }
+    this.mapping_frame++;
+    const f = breakObjectToPieces(this, a4, 0x70);
+    f?.update(); // loc_1F96E runs right away
   }
 }
 
@@ -1307,36 +1344,54 @@ class CorkFloor extends Obj {
     this.core.solidObjectFull(this, this.width_pixels + 0xb, h, h + 1, this.x_pos);
   }
   loc_29742() {
-    const core = this.core, p = this.game.player;
+    const core = this.core, p = this.game.player, p2 = this.game.sidekick;
     const chain = core.chainBonus; // $38
-    const savedAnim = p.anim; // $34
+    const anim = [p.anim, p2?.anim]; // $34 / $36
     this.solid();
-    if (!(this.status & P1_STANDING) || savedAnim !== 2) return this.spriteOnScreenTest();
-    // sub_297CE
-    p.status |= S_ROLL;
-    p.y_radius = 0xe;
-    p.x_radius = 7;
-    p.anim = 2;
-    p.y_vel = -0x300;
-    p.status |= S_INAIR;
-    p.status &= ~S_ONOBJ;
-    p.routine = 2;
+    const d0 = this.status & STANDING_MASK;
+    if (!d0) return this.spriteOnScreenTest(); // loc_2977C
+    const bounce = (pl, a) => { // sub_297C8 / sub_297CE
+      if (a === 2) {
+        pl.status |= S_ROLL;
+        pl.y_radius = 0xe;
+        pl.x_radius = 7;
+        pl.anim = 2;
+        pl.y_vel = -0x300;
+      }
+      pl.status |= S_INAIR; // loc_297EC
+      pl.status &= ~S_ONOBJ;
+      pl.routine = 2;
+    };
+    if (d0 === STANDING_MASK) {
+      if (anim[0] !== 2 && anim[1] !== 2) return this.spriteOnScreenTest();
+      bounce(p, anim[0]);
+      bounce(p2, anim[1]);
+    } else if (d0 & P1_STANDING) {
+      if (anim[0] !== 2) return this.spriteOnScreenTest();
+      bounce(p, 2);
+    } else {
+      if (anim[1] !== 2) return this.spriteOnScreenTest(); // loc_29800
+      bounce(p2, 2);
+    }
     // loc_29818
     core.chainBonus = chain;
     this.status &= 0xe7;
     this.smash();
   }
   loc_29858() {
-    const core = this.core, p = this.game.player;
-    const savedYv = p.y_vel; // $30
+    const core = this.core, p = this.game.player, p2 = this.game.sidekick;
+    const savedYv = p.y_vel, savedYv2 = p2?.y_vel ?? 0; // $30 / $32
     this.solid();
-    if (!(core.d6 & 4)) return this.spriteOnScreenTest();
-    p.y_vel = savedYv;
+    const d6 = core.d6 & 0xc; // hit from below by Player_1 / Player_2
+    if (!d6) return this.spriteOnScreenTest();
+    if (d6 & 4) p.y_vel = savedYv;
+    if ((d6 & 8) && p2) p2.y_vel = savedYv2;
     // loc_298CC
-    if (this.status & P1_STANDING) {
-      p.status |= S_INAIR;
-      p.status &= ~S_ONOBJ;
-    }
+    this.core.players().forEach((pl, i) => {
+      if (!(this.status & (i ? P2_STANDING : P1_STANDING))) return;
+      pl.status |= S_INAIR;
+      pl.status &= ~S_ONOBJ;
+    });
     this.smash();
   }
   smash() {
@@ -1517,7 +1572,9 @@ class AIZFlippingBridge extends Obj {
   }
   update() {
     this.sub_2A0B2(this.child);
-    this.sub_2A23C(this.child);
+    // Player_1 (p1_standing_bit), then Player_2 (p2_standing_bit)
+    const core = this.core;
+    core.players().forEach((p, i) => core.asPlayer(i, () => this.sub_2A23C(this.child, p, core.standBit)));
     if (this.deleteIfNotInRange()) this.child.delete();
   }
   sub_2A0B2(a3) {
@@ -1538,11 +1595,11 @@ class AIZFlippingBridge extends Obj {
     if ((a3.render_flags & 0x80) && ((levelFrameCounter(this.game) + 3) & 7) === 0) this.game.sfx(SFX.GlideLand);
   }
   // sub_2A23C (d1 = width, a2 = slope, d4 = x)
-  sub_2A23C(a3) {
-    const p = this.game.player, core = this.core;
+  sub_2A23C(a3, p, bit) {
+    const core = this.core;
     const d1 = this.width_pixels;
     const frameAt = (d0) => a3.subs[(d0 >> 5) & 7].frame;
-    if (this.status & P1_STANDING) {
+    if (this.status & bit) {
       const d0 = s16(p.x_pos - this.x_pos + d1);
       if (!(p.status & S_INAIR) && d0 >= 0 && d0 < d1 * 2 && frameAt(d0) >= 5) {
         core.solidObjSloped2(this, d1, this.x_pos, this.game.rom.u8.subarray(this.slope, this.slope + 0x80));
@@ -1551,7 +1608,7 @@ class AIZFlippingBridge extends Obj {
       // loc_2A25E
       p.status &= ~S_ONOBJ;
       p.status |= S_INAIR;
-      this.status &= ~P1_STANDING;
+      this.status &= ~bit;
       return;
     }
     // loc_2A292
@@ -1609,7 +1666,7 @@ class AIZCollapsingLogBridge extends Obj {
   }
   update() {
     if (this.collapsing) return this.loc_2A638();
-    const start = this.fire ? aizState(this.core).unkFAA2 : (this.status & P1_STANDING);
+    const start = this.fire ? aizState(this.core).unkFAA2 : (this.status & STANDING_MASK);
     if (start) {
       this.c34 = this.c35;
       this.collapsing = true;
@@ -1638,9 +1695,11 @@ class AIZCollapsingLogBridge extends Obj {
   loc_2A638() {
     this.c34 = u8(this.c34 - 1);
     if (this.c34 === 0) return this.loc_2AB1A();
-    const d3 = this.c34, d1 = this.width_pixels, p = this.game.player;
-    // sub_2A664
-    if (this.status & P1_STANDING) {
+    const d3 = this.c34, d1 = this.width_pixels;
+    // sub_2A664 for Player_1 (p1_standing_bit) and Player_2 (p2_standing_bit)
+    this.core.players().forEach((p, i) => {
+      const bit = i ? P2_STANDING : P1_STANDING;
+      if (!(this.status & bit)) return;
       let release = true;
       const d2 = d1 * 2;
       let d0 = s16(p.x_pos - this.x_pos + d1);
@@ -1650,23 +1709,24 @@ class AIZCollapsingLogBridge extends Obj {
         if (d3 > u8(this.c35 - seg)) release = false;
       }
       if (release) {
-        this.status &= ~P1_STANDING;
+        this.status &= ~bit;
         p.status &= ~(S_ONOBJ | S_PUSH);
         p.status |= S_INAIR;
         p.prev_anim = 1;
       }
-    }
+    });
     this.deleteIfNotInRange();
   }
   // loc_2AB1A
   loc_2AB1A() {
-    const p = this.game.player;
-    if (this.status & P1_STANDING) {
-      this.status &= ~P1_STANDING;
+    this.core.players().forEach((p, i) => {
+      const bit = i ? P2_STANDING : P1_STANDING;
+      if (!(this.status & bit)) return;
+      this.status &= ~bit;
       p.status &= ~S_ONOBJ;
       p.status |= S_INAIR;
       p.anim = 0x1b;
-    }
+    });
     this.delete();
   }
 }
@@ -1827,13 +1887,14 @@ class AIZDrawBridge extends Obj {
   }
   loc_2AB1A() {
     if (this.c34) { this.c34 = u8(this.c34 - 1); return; }
-    const p = this.game.player;
-    if (this.status & P1_STANDING) {
-      this.status &= ~P1_STANDING;
+    this.core.players().forEach((p, i) => {
+      const bit = i ? P2_STANDING : P1_STANDING;
+      if (!(this.status & bit)) return;
+      this.status &= ~bit;
       p.status &= ~S_ONOBJ;
       p.status |= S_INAIR;
       p.anim = 0x1b;
-    }
+    });
     this.delete();
   }
 }
@@ -1978,7 +2039,7 @@ class AIZSpikedLog extends Obj {
         this.c36 = wec;
         this.c34 = 0x81;
         rise = true;
-      } else if (this.status & P1_STANDING) rise = true;
+      } else if (this.status & STANDING_MASK) rise = true;
       else if (this.c32) this.c32 = u8(this.c32 - 4);
     }
     if (rise) {
@@ -2068,7 +2129,7 @@ class Button extends Obj {
     this.mapping_frame = 0;
     const i = this.subtype & 0xf;
     const bit = this.subtype & 0x40 ? 0x80 : 1;
-    if (!(this.status & P1_STANDING)) {
+    if (!(this.status & STANDING_MASK)) {
       if (!(this.subtype & 0x10)) setLevelTrigger(g, i, levelTrigger(g, i) & ~bit);
     } else {
       if (!levelTrigger(g, i)) g.sfx(SFX.Switch);
@@ -2124,24 +2185,29 @@ class VineHandle extends Obj {
     vineInit(this);
     this.prev = prev;
     this.mapping_frame = 0x20;
-    this.grab = 0; // $32 (Player 1)
-    this.regrab = 0; // $34
+    this.grabs = [0, 0]; // $32 / $33 (Player_1 / Player_2)
+    this.regrabs = [0, 0]; // $34 / $35
+    this.pi = 0; // a2: which player's bytes
     this.mode = 0; // $30: 0 hanging, 1 riding the zipline, 2 swinging after the ride
     this.h42 = this.x_pos;
     this.h44 = this.y_pos;
   }
+  // tst.w $32(a0) / move.b #$81 (the ride vine looks at both players' bytes)
+  get grab() { return this.grabs[0] | this.grabs[1]; }
+  set grab(v) { for (let i = 0; i < 2; i++) if (this.grabs[i]) this.grabs[i] = v; }
   update() {
     const d4 = this.x_pos, d5 = this.y_pos;
     vineFollow(this, this.prev);
     if (this.x_pos !== d4) this.h42 = d4;
     if (this.y_pos !== d5) this.h44 = d5;
-    this.sub_20502(this.game.player);
-    if (this.grab && this.mode) return; // the player's hands cover the handle
+    // loc_20988: Player_1 (Ctrl_1_logical), then Player_2 (Ctrl_2_logical)
+    this.core.players().forEach((p, i) => { this.pi = i; this.sub_20502(p); });
+    if ((this.grabs[0] || this.grabs[1]) && this.mode) return; // tst.w $32(a0): a player's hands cover the handle
     this.display();
   }
   sub_20502(p) {
-    if (this.grab === 0) return this.loc_206DE(p);
-    if (this.grab & 0x80) {
+    if (this.grabs[this.pi] === 0) return this.loc_206DE(p);
+    if (this.grabs[this.pi] & 0x80) {
       // loc_205BC: thrown off at the end of a breaking zipline
       p.x_vel = 0x300;
       p.y_vel = 0x200;
@@ -2151,17 +2217,17 @@ class VineHandle extends Obj {
     if (!playerOnScreen(p) || p.routine >= 4) return this.loc_205CE(p);
     if (p.pressed?.jump) {
       p.object_control = 0;
-      this.grab = 0;
+      this.grabs[this.pi] = 0;
       if (this.mode === 1) {
         // loc_2059A: jump off along the rope direction
-        this.regrab = 0x3c;
+        this.regrabs[this.pi] = 0x3c;
         const [sin, cos] = this.core.sincos((this.prev.ang >> 8) & 0xff);
         p.x_vel = s16(cos << 3);
         p.y_vel = s16(sin << 3);
       } else {
         p.x_vel = s16((this.x_pos - this.h42) << 7);
         p.y_vel = s16((this.y_pos - this.h44) << 7);
-        this.regrab = 0x3c;
+        this.regrabs[this.pi] = 0x3c;
         if (p.held?.left) p.x_vel = -0x200;
         if (p.held?.right) p.x_vel = 0x200;
         p.y_vel = s16(p.y_vel - 0x380);
@@ -2179,8 +2245,8 @@ class VineHandle extends Obj {
   }
   loc_205CE(p) {
     p.object_control = 0;
-    this.grab = 0;
-    this.regrab = 0x3c;
+    this.grabs[this.pi] = 0;
+    this.regrabs[this.pi] = 0x3c;
   }
   // hold the player
   loc_205DC(p) {
@@ -2207,9 +2273,9 @@ class VineHandle extends Obj {
   }
   // loc_206DE: grab the handle
   loc_206DE(p) {
-    if (this.regrab) {
-      this.regrab = u8(this.regrab - 1);
-      if (this.regrab) return;
+    if (this.regrabs[this.pi]) {
+      this.regrabs[this.pi] = u8(this.regrabs[this.pi] - 1);
+      if (this.regrabs[this.pi]) return;
     }
     if (u16(p.x_pos - this.x_pos + 0x10) >= 0x20) return;
     if (u16(p.y_pos - this.y_pos) >= 0x18) return;
@@ -2224,7 +2290,7 @@ class VineHandle extends Obj {
     p.spin_dash_flag = 0;
     p.object_control = 3;
     p.render_flags &= ~2;
-    this.grab = 1;
+    this.grabs[this.pi] = 1;
     this.game.sfx(SFX.Grab);
   }
 }
@@ -2454,13 +2520,15 @@ class AIZHollowTree extends Obj {
   constructor(game, d) {
     super(game, d);
     this.width_pixels = 0xd0;
-    this.p30 = 0; // $30 progress (long)
+    this.progress = [0, 0]; // $30 / $34: progress (long) of Player_1 / Player_2
+    this.pi = 0;
     this.t38 = 0;
   }
   update() {
-    const m = this.game.ram, p = this.game.player;
-    this.sub_1D44C(p);
-    if (!(this.status & P1_STANDING) && this.t38) {
+    const m = this.game.ram, p = this.game.player, core = this.core;
+    // sub_1D436: Player_1, then Player_2
+    core.players().forEach((pl, i) => core.asPlayer(i, () => { this.pi = i; this.sub_1D44C(pl, core.standBit); }));
+    if (!(this.status & STANDING_MASK) && this.t38) {
       this.t38--;
       if (this.t38 === 0) {
         m.setW(R.Camera_min_X_pos, 0x1300);
@@ -2479,8 +2547,11 @@ class AIZHollowTree extends Obj {
     }
     this.deleteIfNotInRange();
   }
-  sub_1D44C(p) {
-    if (this.status & P1_STANDING) return this.riding(p);
+  get p30() { return this.progress[this.pi]; }
+  set p30(v) { this.progress[this.pi] = v; }
+  sub_1D44C(p, bit) {
+    this.bit = bit;
+    if (this.status & bit) return this.riding(p);
     if (p.status & S_INAIR) return;
     const a = u16(p.x_pos + 0x10);
     if (a < u16(this.x_pos)) return;
@@ -2493,6 +2564,7 @@ class AIZHollowTree extends Obj {
     this.p30 = 0;
     p.object_control |= 0x40 | 2;
     p.anim = 0;
+    if (p !== this.game.player) return; // cmpa.w #Player_1,a1
     this.core.spawn(new AIZ1TreeRevealControl(this.game));
     const m = this.game.ram;
     m.setW(R.Camera_min_X_pos, 0x2c60);
@@ -2533,7 +2605,7 @@ class AIZHollowTree extends Obj {
     p.anim = 0;
     p.prev_anim = 1;
     p.status &= ~S_ONOBJ;
-    this.status &= ~P1_STANDING;
+    this.status &= ~this.bit;
     p.flips_remaining = 0;
     p.flip_speed = 4;
     p.object_control &= ~(0x40 | 2);

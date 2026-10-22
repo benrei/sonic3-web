@@ -101,22 +101,31 @@ export class Rom {
   }
 
   // Sprite mappings (S3K format): per frame, count word then 6-byte pieces.
-  mappings(base) {
+  mappings(base, img = this.u8) {
+    const u16 = (a) => (img[a] << 8) | img[a + 1];
+    const s16 = (a) => (u16(a) << 16) >> 16;
+    const s8 = (a) => (img[a] << 24) >> 24;
     const frames = [];
-    const n = this.u16(base) / 2;
+    const n = u16(base) / 2;
     for (let f = 0; f < n; f++) {
-      const o = base + this.u16(base + f * 2);
-      const cnt = this.u16(o);
+      const o = base + u16(base + f * 2);
+      // Entries past the real end of a table point at unrelated data; a real frame never has
+      // more than a few dozen pieces (the VDP only shows 80 sprites in total).
+      let cnt = u16(o);
+      if (cnt > 80) cnt = 0;
       const pieces = [];
       for (let i = 0; i < cnt; i++) {
         const p = o + 2 + i * 6;
-        const size = this.u8[p + 1];
-        pieces.push({ y: this.s8(p), w: ((size >> 2) & 3) + 1, h: (size & 3) + 1, tile: this.u16(p + 2), x: this.s16(p + 4) });
+        const size = img[p + 1];
+        pieces.push({ y: s8(p), w: ((size >> 2) & 3) + 1, h: (size & 3) + 1, tile: u16(p + 2), x: s16(p + 4) });
       }
       frames.push(pieces);
     }
     return frames;
   }
+  // Sprite mappings from the S&K half of an S3&K image (labels from sonic3k.asm).
+  skMappings(base) { return this.mappings(base, this.full); }
+
 
   // Dynamic PLCs: per frame list of { tile, count } into an uncompressed art block.
   dplc(base) {

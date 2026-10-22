@@ -7,6 +7,7 @@ export const R = {
   HScroll_table: 0xffa800,
   H_scroll_buffer: 0xffe000,
   H_scroll_buffer_end: 0xffe380,
+  Stat_table: 0xffe400, // = Pos_table_P2: Ctrl_1_logical + status per frame (Tails' CPU)
   Pos_table: 0xffe500,
   Camera_RAM: 0xffee00,
   H_scroll_amount: 0xffee00,

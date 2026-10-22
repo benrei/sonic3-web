@@ -72,6 +72,9 @@ export class Water {
     this.breathing = null; // Breathing_bubbles slot
     this.dust = null; // Dust slot
     game.player.water = this;
+    if (game.sidekick) game.sidekick.water = this;
+    this.breathing2 = null; // Breathing_bubbles_P2
+    this.dust2 = null; // Dust_P2
     if (!this.flag) return;
     // LoadWaterPalette: LoadPalette2 into Water_palette (and Target_water_palette, which the
     // level fade-in copies over Water_palette lines 2-4: the end result is the same palette)
@@ -91,6 +94,7 @@ export class Water {
     const core = game.core;
     this.dust = new Dust(game);
     core.objects.unshift(this.dust);
+    if (game.sidekick) core.objects.unshift((this.dust2 = new Dust(game, game.sidekick)));
     if ((this.zoneAct >> 8) === 1) core.objects.unshift(new HCZWaveSplash(game));
   }
 
@@ -103,19 +107,22 @@ export class Water {
     this.enteredCounter = (this.enteredCounter + 1) & 0xff;
     if (!entered) return;
     // move.l #Obj_AirCountdown,(Breathing_bubbles).w / move.b #$81,subtype: the slot keeps
-    // its state, so an already running countdown controller just carries on
-    if (!this.breathing || !this.breathing.alive) {
-      this.breathing = new AirCountdown(this.game, { x: p.x_pos, y: p.y_pos, subtype: 0x81 });
-      this.breathing.parent = p;
-      this.game.core.objects.unshift(this.breathing);
+    // its state, so an already running countdown controller just carries on.
+    // Player_2 has his own slot (Breathing_bubbles_P2).
+    const slot = p === this.game.player ? 'breathing' : 'breathing2';
+    if (!this[slot] || !this[slot].alive) {
+      this[slot] = new AirCountdown(this.game, { x: p.x_pos, y: p.y_pos, subtype: 0x81 });
+      this[slot].parent = p;
+      this.game.core.objects.unshift(this[slot]);
     }
   }
 
-  // move.w #1<<8,anim(a6): Dust object splash
-  splash() {
-    if (!this.dust) return;
-    this.dust.anim = 1;
-    this.dust.prev_anim = 0;
+  // move.w #1<<8,anim(a6): Dust object splash (Dust_P2 for Player_2)
+  splash(p) {
+    const d = p && p !== this.game.player ? this.dust2 : this.dust;
+    if (!d) return;
+    d.anim = 1;
+    d.prev_anim = 0;
   }
 
   // Obj_LightningShield_DestroyUnderwater: flash the underwater palette white; the
@@ -164,8 +171,9 @@ export class Water {
 // ============================================================================ Dust
 // Obj_DashDust (loc_1792A), splash only. anim 0 = idle (frame 0, empty), 1 = splash.
 class Dust extends Obj {
-  constructor(game) {
+  constructor(game, player = null) {
     super(game, {});
+    this.player = player; // null = Player_1
     this.mappings = game.maps(MAP_DASHDUST);
     this.render_flags |= 4;
     this.priority = 0x80;
@@ -174,7 +182,7 @@ class Dust extends Obj {
     this.lastDplc = -1; // $34
   }
   update() {
-    const p = this.game.player;
+    const p = this.player ?? this.game.player;
     if (this.anim === 1) {
       // loc_17948
       this.y_pos = this.game.ram.w(R.Water_level);
@@ -384,7 +392,7 @@ export class AirCountdown extends Obj {
       this.t3a = 1;
       this.t30 = 0x78;
       p.drown(); // object_control $81, sfx_Drown, Player_ResetAirTimer, anim $17, routine $C
-      m.setB(R.Deform_lock, 1);
+      if (p === game.player) m.setB(R.Deform_lock, 1); // cmpa.w #Player_1,a2
       return;
     }
     p.air_left--;
@@ -508,7 +516,7 @@ export class Bubbler extends Obj {
     this.angle = (this.angle + 1) & 0xff;
     this.x_pos = s16(this.f30 + this.game.rom.s8(AIRCOUNTDOWN_WOBBLE + (a & 0x7f)));
     if (this.f2e) {
-      this.breathe(this.game.player); // sub_2E2BE (Player 1 only here)
+      for (const p of this.game.core.players()) this.breathe(p); // sub_2E2BE: Player_1, Player_2
       if (this.routine === 6) return this.pop();
     }
     this.moveSprite2();
@@ -546,11 +554,18 @@ export class Bubbler extends Obj {
     p.jumping = 0;
     p.status &= ~(S_PUSH | S_ROLLJUMP);
     if (p.status & S_ROLL) {
-      // Obj_Sonic
-      p.status &= ~S_ROLL;
-      p.y_radius = 0x13;
-      p.x_radius = 9;
-      p.y_pos = s16(p.y_pos - 5);
+      if (!p.character_id) {
+        // Obj_Sonic
+        p.status &= ~S_ROLL;
+        p.y_radius = 0x13;
+        p.x_radius = 9;
+        p.y_pos = s16(p.y_pos - 5);
+      } else {
+        // loc_2E370 (Tails / Knuckles: the roll bit is left set)
+        p.y_radius = 0xf;
+        p.x_radius = 9;
+        p.y_pos = s16(p.y_pos - 1);
+      }
     }
     if (this.routine === 6) return;
     this.routine = 6;
