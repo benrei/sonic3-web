@@ -182,14 +182,20 @@ function startZone(i, keepCheckpoint = false) {
 }
 
 // ---------------- Input ----------------
+// Two players share one keyboard: player 1 on the right (arrows + , . - / right Shift / numpad),
+// player 2 on the left (W A S D + Space / Q / E / Z / X / C).
 const KEYMAP = {
   ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
-  KeyZ: 'a', KeyX: 'b', KeyC: 'c', Space: 'c', KeyA: 'a', KeyS: 'b', KeyD: 'c', Enter: 'start', Escape: 'back',
+  Comma: 'a', Period: 'b', Slash: 'c', ShiftRight: 'c', ControlRight: 'b', Numpad0: 'a', NumpadDecimal: 'b',
+  Enter: 'start', NumpadEnter: 'start', Escape: 'back',
 };
 const KEYS = ['up', 'down', 'left', 'right', 'a', 'b', 'c', 'start', 'back'];
-// Second controller (Ctrl_2): takes over the Tails sidekick in "Sonic & Tails" (I/J/K/L + Q,
-// or gamepad #2)
-const KEYMAP2 = { KeyI: 'up', KeyJ: 'left', KeyK: 'down', KeyL: 'right', KeyQ: 'a' };
+// Second controller (Ctrl_2): takes over the Tails sidekick in "Sonic & Tails" (or gamepad #2).
+// In one-player modes and in the menu it simply drives player 1 too.
+const KEYMAP2 = {
+  KeyW: 'up', KeyA: 'left', KeyS: 'down', KeyD: 'right',
+  Space: 'c', KeyQ: 'a', KeyE: 'b', KeyZ: 'a', KeyX: 'b', KeyC: 'c',
+};
 const held2 = {};
 const latch2 = {}; // presses shorter than a frame still count
 let prevHeld2 = {};
@@ -283,7 +289,12 @@ function readInput() {
   for (const k of KEYS) { pressed2[k] = (cur2[k] && !prevHeld2[k]) || !!latch2[k]; latch2[k] = false; }
   prevHeld = cur;
   prevHeld2 = cur2;
-  return { held: cur, pressed, input2: { held: cur2, pressed: pressed2 } };
+  if (game && menu.hidden && game.character === 'sonic-tails') {
+    return { held: cur, pressed, input2: { held: cur2, pressed: pressed2 } };
+  }
+  const held1 = {}, pressed1 = {}, none = {};
+  for (const k of KEYS) { held1[k] = cur[k] || cur2[k]; pressed1[k] = pressed[k] || pressed2[k]; none[k] = false; }
+  return { held: held1, pressed: pressed1, input2: { held: none, pressed: none } };
 }
 
 // ---------------- Sound / fullscreen ----------------

@@ -20,17 +20,18 @@ Ingen byggesteg – rene ES-moduler, som også kjører i Node.
 
 | Tast | Handling |
 | --- | --- |
-| ← → | løpe |
-| ↓ | rulle (i fart) / dukke |
+| ← → ↑ ↓ | spiller 1: løpe / se opp / rulle / dukke |
+| , . - / høyre Shift | spiller 1: hopp (A/B/C) |
+| W A S D | spiller 2 (Tails i «Sonic & Tails»): bevegelse |
+| Mellomrom / Q / E (også Z X C) | spiller 2: hopp |
 | ↓ + hopp | spindash (slipp ↓ for å fyre av) |
-| Z / X / C / Mellomrom | hopp (A/B/C) |
 | Enter | start / pause |
 | Esc | sonemeny |
 | M / F | lyd av/på / fullskjerm |
 | hopp i luften (Tails) | fly – trykk gjentatte ganger for å stige |
-| I / J / K / L + Q | kontroller 2: overtar Tails i «Sonic & Tails» (ellers styres han av CPU-en) |
 
-Gamepad og berøringsknapper (mobil) støttes også (gamepad nr. 2 = kontroller 2).
+Med én spiller (eller i menyen) styrer begge tastatursidene samme figur. I «Sonic & Tails» styres Tails av
+CPU-en til spiller 2 trykker noe. Gamepad og berøringsknapper (mobil) støttes også (gamepad nr. 2 = spiller 2).
 
 ## Hvordan ROM-en ble forstått
 
